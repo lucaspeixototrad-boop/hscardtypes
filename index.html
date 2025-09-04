@@ -1,0 +1,658 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Phrase Tag Viewer — Installation Guide</title>
+  <style>
+    :root { --bg:#0b1220; --panel:#0f1629; --text:#e6eefc; --muted:#9fb3d9; --accent:#7aa2ff; --ok:#2bd48f; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Inter,Arial,sans-serif; }
+    .wrap { max-width:960px; margin:40px auto; padding:0 20px; }
+    h1 { font-size:28px; margin:0 0 8px; }
+    h2 { margin:28px 0 10px; font-size:20px; }
+    p  { color:var(--muted); }
+    .card { background:var(--panel); border:1px solid rgba(255,255,255,.07); border-radius:12px; padding:18px; margin:16px 0; }
+    ol.steps { padding-left:20px; }
+    .codewrap { position:relative; margin-top:12px; }
+    .copybtn {
+      position:absolute; top:10px; right:10px; padding:8px 12px; border-radius:8px;
+      background:var(--accent); color:#06131f; border:none; font-weight:700; cursor:pointer;
+      box-shadow:0 6px 16px rgba(0,0,0,.25);
+    }
+    .copybtn:active { transform:translateY(1px); }
+    pre { margin:0; max-height:420px; overflow:auto; background:#0a1020; border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:16px; }
+    code { color:#c7d7ff; font-family:ui-monospace,Menlo,Consolas,Monaco,monospace; font-size:13px;
+           white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; }
+    .tip { color:#b7c7ee; font-size:14px; }
+    .ok { color:var(--ok); font-weight:700; }
+    a.btn {
+      display:inline-block; padding:10px 14px; border-radius:10px; text-decoration:none;
+      background:#18233b; color:#dbe7ff; border:1px solid rgba(255,255,255,.08);
+    }
+    a.btn:hover { background:#1b2744; }
+    ul { margin:0; padding-left:20px; }
+    .notice { font-size:14px; color:#c8d6ff; opacity:.9; margin:8px 0 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Phrase Tag Viewer</h1>
+    <p class="tip">
+      A small helper that reads the <b>active target segment</b> in Phrase/Memsource and shows a
+      copy-ready string where <b>Phrase tag widgets are replaced by their literal values</b>.
+      It supports <code>mq:rxt</code> (via <code>displaytext</code>/<code>val</code>) and
+      paired tags (<code>bpt/ept</code>, e.g. <code>&lt;strong&gt;</code>…<code>&lt;/strong&gt;</code>).
+      Numbers inside braces like <code>{{123}}</code> are output as <code>123</code>.
+    </p>
+
+    <div class="card">
+      <h2>1) Install Tampermonkey</h2>
+      <p>Install the Tampermonkey extension for your browser:</p>
+      <p><a class="btn" href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Go to tampermonkey.net</a></p>
+      <p class="tip">On that page, pick your browser (Chrome, Edge, Firefox, etc.) and follow the store link to install.</p>
+    </div>
+
+    <div class="card">
+      <h2>2) Create a new userscript</h2>
+      <ol class="steps">
+        <li>Click the Tampermonkey icon in your browser toolbar (you may need to enable it in your browser's extension settings).</li>
+        <li>Click <b>+ Create a new script…</b>.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>3) Paste the script, then save</h2>
+      <p>Copy the script below by clicking <b>Copy code</b>, then paste into the Tampermonkey editor, replacing any previous content. Save by going to <b>File → Save</b> or using <b>Ctrl+S</b>.</p>
+
+      <div class="codewrap">
+        <button class="copybtn" id="copyCodeBtn">Copy code</button>
+        <pre><code id="codeblock">(no script pasted yet)</code></pre>
+      </div>
+      <!-- The payload below is NEVER executed and NEVER parsed as HTML/JS. It's plain text. -->
+      <script id="payload" type="text/plain">
+// ==UserScript==
+// @name         Phrase Tag Viewer
+// @namespace    hs.phrase.copyexport
+// @version      1.0.2
+// @description  Copy-ready export of active Phrase target segment: tag widgets → display values (mq:rxt) and bpt/ept inner markup; strip {123}→123; colored tags by theme; light/dark with memory; iframe-safe.
+// @match        https://app.phrase.com/*
+// @match        https://*.phrase.com/*
+// @match        https://cloud.memsource.com/*
+// @match        https://*.memsource.com/*
+// @run-at       document-idle
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(() => {
+  // ---------- Base ----------
+  const IS_TOP = window.top === window;
+  const ORIGIN_ID = `${location.origin}${location.pathname}`;
+  const THEME_KEY = 'ptv-theme'; // 'light' | 'dark'
+  const $ = (s, r = document) => r.querySelector(s);
+
+  // store last payload received from frames
+  let lastActive = null;
+
+  // ---------- UI ----------
+  let ui, showBtn;
+
+  function ensureUI() {
+    if (!IS_TOP) return;
+
+    if (!$('#hs-copybox')) {
+      ui = document.createElement('div');
+      ui.id = 'hs-copybox';
+      ui.innerHTML = `
+        <div class="hs-head">
+          <strong>Phrase Tag Viewer</strong>
+          <div class="hs-menu">
+            <div class="hs-fontctrl" title="Preview font size (px)">
+              <label for="hs-fs" class="hs-fs-label">A</label>
+              <input id="hs-fs" type="number" min="10" max="48" step="1" value="14" />
+            </div>
+            <label class="hs-theme-toggle" title="Toggle dark mode">
+              <input id="hs-theme" type="checkbox"/>
+              <span>Dark</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="hs-body">
+          <div class="hs-textwrap">
+            <div id="hs-pretty" aria-label="Converted preview" tabindex="0"></div>
+            <textarea id="hs-out" aria-hidden="true"></textarea>
+          </div>
+          <div class="hs-buttons">
+            <button id="hs-copybtn" title="Copy to clipboard">Copy</button>
+            <button id="hs-hide" title="Hide panel">Hide</button>
+          </div>
+        </div>
+      `;
+
+      Object.assign(ui.style, {
+        position: 'fixed',
+        left: '12px',
+        bottom: '40px',
+        width: '1420px',
+        height: '110px',
+        maxWidth: '98vw',
+        zIndex: 2147483647,
+        borderRadius: '10px',
+        boxShadow: '0 8px 24px rgba(0,0,0,.4)',
+        font: '12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+        padding: '10px',
+        display: 'flex',
+        flexDirection: 'column'
+      });
+
+      const style = document.createElement('style');
+      style.textContent = `
+        /* ---------- Layout ---------- */
+        #hs-copybox .hs-head{
+          display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;min-height:20px
+        }
+        #hs-copybox .hs-menu{ display:flex;gap:10px;align-items:center }
+        #hs-body{ display:flex;gap:6px;flex:1;min-height:0; }
+        #hs-body .hs-textwrap{ flex:1;display:flex;min-width:0; }
+        #hs-pretty{
+          width:100%;height:100%;
+          border-radius:8px;padding:6px;
+          box-sizing:border-box;overflow:auto;
+          white-space:pre-wrap;word-break:break-word;
+          font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;
+          line-height:1.4; font-size:14px; /* controlled by input */
+        }
+        #hs-out{ display:none; } /* hidden textarea for copy */
+
+        #hs-copybox .hs-buttons{
+          display:flex;flex-direction:column;gap:6px;align-items:stretch;justify-content:flex-start;
+          min-width:110px;
+        }
+
+        /* ---------- Buttons (compact width, comfy height) ---------- */
+        #hs-copybox button{
+          border-radius:6px; cursor:pointer;
+          font-size:12px; line-height:1; height:32px;
+          padding:6px 10px; min-width:72px;
+        }
+
+        /* ---------- Font size control (top menu) ---------- */
+        #hs-copybox .hs-fontctrl{ display:flex;align-items:center;gap:4px }
+        #hs-copybox .hs-fs-label{
+          font-weight:700; opacity:.85; display:inline-block; width:14px; text-align:center; font-size:12px;
+        }
+        #hs-copybox #hs-fs{
+          width:56px;height:24px;border-radius:6px;padding:2px 6px;font-size:12px
+        }
+
+        /* ---------- Theme toggle ---------- */
+        #hs-copybox .hs-theme-toggle{
+          display:inline-flex;align-items:center;gap:6px;user-select:none;cursor:pointer;font-size:12px
+        }
+        #hs-copybox .hs-theme-toggle input{ margin:0 }
+
+        /* ---------- Show button (near Hide) ---------- */
+        #hs-showbtn{
+          position:fixed; z-index:2147483647; border-radius:999px;
+          padding:6px 10px; cursor:pointer; font:12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+          box-shadow:0 8px 24px rgba(0,0,0,.4)
+        }
+        #hs-showbtn.hidden{ display:none!important }
+
+        /* ---------- THEME: LIGHT (default) ---------- */
+        #hs-copybox.ptv-light{
+          background:#f7f8fa; color:#0b0f12; border:1px solid #cfd8e3;
+        }
+        #hs-copybox.ptv-light #hs-pretty{
+          background:#ffffff; color:#111827; border:1px solid #cfd8e3;
+        }
+        #hs-copybox.ptv-light .hs-taglit{ color:#1d4ed8; font-weight:600; }
+        #hs-copybox.ptv-light button{
+          background:#eef2f7; color:#0b0f12; border:1px solid #cbd5e1;
+        }
+        #hs-copybox.ptv-light button:hover{ background:#e6edf7 }
+        #hs-copybox.ptv-light #hs-fs{ background:#ffffff; color:#0b0f12; border:1px solid #cbd5e1 }
+        #hs-showbtn.ptv-light{
+          background:#eef2f7; color:#0b0f12; border:1px solid #cbd5e1;
+        }
+        #hs-showbtn.ptv-light:hover{ background:#e6edf7 }
+
+        /* ---------- THEME: DARK ---------- */
+        #hs-copybox.ptv-dark{
+          background:#0b0f12; color:#d7e2ea; border:1px solid #1f2a33;
+        }
+        #hs-copybox.ptv-dark #hs-pretty{
+          background:#0e1317; color:#e8f3ff; border:1px solid #1e2a33;
+        }
+        #hs-copybox.ptv-dark .hs-taglit{ color:#f6c560; font-weight:600; }
+        #hs-copybox.ptv-dark button{
+          background:#10202a; color:#bfe8ff; border:1px solid #1e2f3a;
+        }
+        #hs-copybox.ptv-dark button:hover{ background:#143040 }
+        #hs-copybox.ptv-dark #hs-fs{ background:#0e1317; color:#e8f3ff; border:1px solid #1e2a33 }
+        #hs-showbtn.ptv-dark{
+          background:#10202a; color:#bfe8ff; border:1px solid #1e2f3a;
+        }
+        #hs-showbtn.ptv-dark:hover{ background:#143040 }
+      `;
+      document.documentElement.append(style, ui);
+
+      // Persistent Show button
+      showBtn = document.createElement('button');
+      showBtn.id = 'hs-showbtn';
+      showBtn.textContent = 'Show';
+      showBtn.className = 'hidden';
+      document.documentElement.appendChild(showBtn);
+
+      // Theme: load + apply
+      const themeInput = $('#hs-theme');
+      function applyTheme(theme) {
+        ui.classList.toggle('ptv-light', theme === 'light');
+        ui.classList.toggle('ptv-dark', theme === 'dark');
+        showBtn.classList.toggle('ptv-light', theme === 'light');
+        showBtn.classList.toggle('ptv-dark', theme === 'dark');
+        localStorage.setItem(THEME_KEY, theme);
+        themeInput.checked = (theme === 'dark');
+      }
+      const savedTheme = localStorage.getItem(THEME_KEY) || 'light';
+      applyTheme(savedTheme);
+      themeInput.addEventListener('change', () => {
+        applyTheme(themeInput.checked ? 'dark' : 'light');
+      });
+
+      // Copy button (cross-browser)
+      const copyToClipboard = async () => {
+        const ta = $('#hs-out');
+        const text = ta ? ta.value : '';
+        try {
+          if (typeof GM_setClipboard === 'function') {
+            GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
+            return;
+          }
+          await navigator.clipboard.writeText(text);
+        } catch {
+          if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
+        }
+      };
+      $('#hs-copybtn').addEventListener('click', copyToClipboard);
+
+      // Font size controller → affects preview font size
+      const fsInput = $('#hs-fs');
+      const applyFs = () => {
+        const px = Math.max(10, Math.min(48, Number(fsInput.value || 14) || 14));
+        const pretty = $('#hs-pretty');
+        if (pretty) pretty.style.fontSize = px + 'px';
+      };
+      fsInput.addEventListener('change', applyFs);
+      fsInput.addEventListener('input', applyFs);
+      applyFs();
+
+      // Show button positioning near Hide
+      function positionShowButtonNearHide() {
+        if (!ui || !showBtn) return;
+        const r = ui.getBoundingClientRect();
+        const leftPx = Math.round(r.left + r.width - 88); // near right edge
+        const bottomPx = Math.max(8, Math.round(window.innerHeight - r.bottom));
+        showBtn.style.left = leftPx + 'px';
+        showBtn.style.bottom = bottomPx + 'px';
+      }
+
+      // Hide / Show toggles
+      const doHide = () => {
+        positionShowButtonNearHide();
+        ui.classList.add('hidden');
+        showBtn.classList.remove('hidden');
+      };
+      const doShow = () => {
+        ui.classList.remove('hidden');
+        showBtn.classList.add('hidden');
+      };
+      $('#hs-hide').addEventListener('click', doHide);
+      showBtn.addEventListener('click', doShow);
+
+      // Reposition show button when window resizes (while hidden)
+      window.addEventListener('resize', () => {
+        if (!ui.classList.contains('hidden')) return;
+        positionShowButtonNearHide();
+      });
+
+      // Keyboard toggle (Alt+P)
+      window.addEventListener('keydown', e => {
+        if (e.altKey && (e.key === 'p' || e.key === 'P')) {
+          if (ui.classList.contains('hidden')) doShow(); else doHide();
+        }
+      }, true);
+    } else {
+      ui = $('#hs-copybox');
+      showBtn = $('#hs-showbtn');
+    }
+  }
+
+  const setPreview = (plain, html) => {
+    const pretty = $('#hs-pretty');
+    const ta = $('#hs-out');
+    if (pretty) pretty.innerHTML = html || '';
+    if (ta) ta.value = plain || '';
+  };
+
+  // ---------- Decoding + helpers ----------
+  const decodeHtml = (s) => {
+    const t = document.createElement('textarea');
+    t.innerHTML = s;
+    return t.value;
+  };
+  const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])
+  );
+
+  // "{123}" → "123" (numbers only; leaves "{i}" etc. untouched)
+  function stripNumericBraces(s) {
+    return String(s ?? '').replace(/\{(\d+)\}/g, '$1');
+  }
+
+  // Extract Phrase tag content:
+  // - mq:rxt (ph): use displaytext or val (decoded)
+  // - bpt/ept: inner payload between <bpt>...</bpt> or <ept>...</ept> (decoded)
+  // - generic: any <tag>payload</tag> inner text decoded
+  // - fallback: data-tag-content (e.g., "{3}")
+  function extractPhraseTagValue(el) {
+    const meta =
+      el.querySelector?.('.tag_metadata_content')?.textContent ||
+      el.getAttribute?.('tmp-title') ||
+      el.getAttribute?.('title') ||
+      '';
+    if (!meta) return { text: '', fromTag: true };
+
+    const un1 = decodeHtml(meta);
+
+    // A) mq:rxt
+    let m = un1.match(/displaytext="([^"]*)"/i);
+    if (m) return { text: decodeHtml(m[1] || ''), fromTag: true };
+    m = un1.match(/val="([^"]*)"/i);
+    if (m) return { text: decodeHtml(m[1] || ''), fromTag: true };
+
+    // B) bpt/ept
+    let innerMatch =
+      un1.match(/<bpt\b[^>]*>([\s\S]*?)<\/bpt>/i) ||
+      un1.match(/<ept\b[^>]*>([\s\S]*?)<\/ept>/i);
+    if (innerMatch) {
+      return { text: decodeHtml(innerMatch[1] || ''), fromTag: true };
+    }
+
+    // C) generic <tag>payload</tag>
+    innerMatch = un1.match(/<\w+\b[^>]*>([\s\S]*?)<\/\w+>/i);
+    if (innerMatch) {
+      return { text: decodeHtml(innerMatch[1] || ''), fromTag: true };
+    }
+
+    // D) placeholder fallback
+    const ph = el.getAttribute?.('data-tag-content') || '';
+    return { text: ph, fromTag: true };
+  }
+
+  // Build both plain and HTML (colored for tag-derived pieces)
+  function rebuildConvertedRich(container) {
+    if (!container) return { plain: '', html: '' };
+
+    let plain = '';
+    let html = '';
+
+    container.childNodes.forEach(n => {
+      if (n.nodeType === 3) {
+        const t = n.nodeValue || '';
+        plain += t;
+        html  += escapeHtml(t);
+        return;
+      }
+      if (n.nodeType === 1) {
+        const el = n;
+        if (el.classList?.contains('te_txt')) {
+          const t = el.textContent || '';
+          plain += t;
+          html  += escapeHtml(t);
+          return;
+        }
+        if (el.classList?.contains('te_tag') || el.matches?.('[data-testid="tag"], [data-tag], [data-tag-type]')) {
+          const { text, fromTag } = extractPhraseTagValue(el);
+
+          if (!fromTag) { // future-proof
+            plain += text;
+            html  += escapeHtml(text);
+            return;
+          }
+
+          // If tag text is "{123}", show 123 (colored), and add 123 to plain
+          const m = /^\{(\d+)\}$/.exec(text);
+          if (m) {
+            const num = m[1];
+            plain += num;
+            html  += `<span class="hs-taglit">${escapeHtml(num)}</span>`;
+            return;
+          }
+
+          plain += text;
+          html  += `<span class="hs-taglit">${escapeHtml(text)}</span>`;
+          return;
+        }
+      }
+    });
+
+    // Global numeric-brace strip as final pass (keeps previous behavior)
+    plain = stripNumericBraces(plain);
+    return { plain, html };
+  }
+
+  // ---------- Active row detection ----------
+  const finders = {
+    byCaret(doc) { const c = doc.getElementById?.('segment-text-editor-input'); return c ? c.closest('.twe_segment') : null; },
+    byCursor(doc) { const cur = doc.querySelector?.('.twe_segment .twe_target .te_selection_container .te_cursor'); return cur ? cur.closest('.twe_segment') : null; },
+    byFocusedInput(doc) {
+      const ae = doc.activeElement;
+      if (!ae) return null;
+      if (ae.matches?.('input.twe-main-input, textarea.twe-main-input, [contenteditable="true"]')) {
+        return ae.closest('.twe_segment') || ae.closest('[data-testid="segment"]') || null;
+      }
+      return null;
+    },
+    byActiveClass(doc) { return doc.querySelector?.('.twe_segment.twe_active, .twe_segment.twe_active_background, [data-testid="segment"][data-selected="true"]'); }
+  };
+
+  function readActiveFromDoc(doc) {
+    const row = finders.byCaret(doc) || finders.byCursor(doc) || finders.byFocusedInput(doc) || finders.byActiveClass(doc);
+    if (!row) return { row: null, plain: '', html: '' };
+
+    const cont =
+      row.querySelector?.('.twe_target .te_text_container') ||
+      row.querySelector?.('[data-testid="target"] .te_text_container') ||
+      row.querySelector?.('.twe_target [data-role="text-container"]');
+
+    const live = row.querySelector?.('.twe_target .twe-main-input, textarea.twe-main-input, [contenteditable="true"]');
+
+    if (cont) return { row, ...rebuildConvertedRich(cont) };
+
+    const raw = (live && (live.value || live.textContent)) || '';
+    const escaped = escapeHtml(raw);
+    return { row, plain: stripNumericBraces(raw), html: escaped };
+  }
+
+  // ---------- Same-origin iframe sweep ----------
+  function getAllDocs(rootDoc = document, acc = new Set()) {
+    if (!rootDoc || acc.has(rootDoc)) return { docs: Array.from(acc), totalFrames: 0, okFrames: 0 };
+    acc.add(rootDoc);
+    const iframes = rootDoc.querySelectorAll('iframe');
+    let total = 0, ok = 0;
+    for (const f of iframes) {
+      total++;
+      try {
+        const d = f.contentDocument || f.contentWindow?.document;
+        if (d) {
+          ok++;
+          const nested = getAllDocs(d, acc);
+          total += nested.totalFrames; ok += nested.okFrames;
+        }
+      } catch (e) {}
+    }
+    return { docs: Array.from(acc), totalFrames: total, okFrames: ok };
+  }
+
+  // ---------- Bridge ----------
+  const MSG_MARK = '__hs_bridge__';
+
+  function postToChildren(msg) {
+    if (!IS_TOP) return;
+    for (let i = 0; i < window.frames.length; i++) {
+      try { window.frames[i].postMessage({ [MSG_MARK]: true, ...msg }, '*'); } catch (e) {}
+    }
+  }
+  function postToParent(msg) {
+    if (IS_TOP) return;
+    try { window.parent.postMessage({ [MSG_MARK]: true, ...msg }, '*'); } catch (e) {}
+  }
+
+  window.addEventListener('message', e => {
+    const d = e?.data;
+    if (!d || !d[MSG_MARK]) return;
+
+    if (IS_TOP) {
+      if (d.type === 'ACTIVE') {
+        // accept {plain, html} (or legacy {text, html})
+        lastActive = {
+          plain: (d.payload && (d.payload.plain ?? d.payload.text)) || '',
+          html:  (d.payload && d.payload.html) || ''
+        };
+        ensureUI();
+        render();
+      }
+    } else {
+      if (d.type === 'PING') postToParent({ type: 'PONG', frameId: ORIGIN_ID, info: 'editor-frame' });
+      if (d.type === 'REQUEST_ACTIVE') {
+        const res = readActiveFromDoc(document);
+        postToParent({
+          type: 'ACTIVE', frameId: ORIGIN_ID, info: 'editor-frame',
+          payload: { plain: res.plain || '', html: res.html || '' }
+        });
+      }
+    }
+  }, true);
+
+  // ---------- Render/update ----------
+  function render() {
+    if (!IS_TOP) return;
+    ensureUI();
+
+    // try same-origin first
+    const { docs } = getAllDocs(document);
+    let found = null;
+    for (const d of docs) {
+      const res = readActiveFromDoc(d);
+      if (res.row) { found = res; break; }
+    }
+
+    // then fall back to last iframe payload
+    const active = found || lastActive || null;
+    const plain = active?.plain || '';
+    const html  = active?.html  || '';
+
+    setPreview(plain, html);
+  }
+
+  function wireInstantSignals() {
+    const instant = () => { IS_TOP ? render() : tickFrame(); };
+    ['input','keyup','selectionchange','pointerup','focusin'].forEach(ev =>
+      document.addEventListener(ev, instant, true)
+    );
+  }
+
+  function tickTop() {
+    postToChildren({ type: 'PING' });
+    postToChildren({ type: 'REQUEST_ACTIVE' });
+    render();
+  }
+  function tickFrame() {
+    const res = readActiveFromDoc(document);
+    if (res && (res.row || res.plain || res.html)) {
+      postToParent({
+        type: 'ACTIVE', frameId: ORIGIN_ID, info: 'editor-frame',
+        payload: { plain: res.plain || '', html: res.html || '' }
+      });
+    } else {
+      postToParent({ type: 'PONG', frameId: ORIGIN_ID, info: 'probe' });
+    }
+  }
+
+  // ---------- Boot ----------
+  function boot() {
+    if (IS_TOP) {
+      ensureUI();
+      wireInstantSignals();
+      setTimeout(tickTop, 300);
+      setInterval(tickTop, 350);
+    } else {
+      wireInstantSignals();
+      setTimeout(tickFrame, 300);
+      setInterval(tickFrame, 300);
+    }
+  }
+  boot();
+})();
+      </script>
+    </div>
+
+    <div class="card">
+      <h2>4) Open Phrase and try it</h2>
+      <ul>
+        <li>Open a job in <b>app.phrase.com</b> (or your Memsource domain).</li>
+        <li>Select a <b>target segment</b>.</li>
+        <li>Look for the “<b>Phrase Tag Viewer</b>” panel at the bottom-left of the page.</li>
+        <li>Use <b>Copy</b> to copy the plain converted string, or toggle Dark mode / font size from the menu.</li>
+      </ul>
+      <p class="ok">If you see text appearing in the panel as you click segments, you’re all set!</p>
+    </div>
+
+    <div class="card">
+      <h2>Troubleshooting</h2>
+      <ul>
+        <li>Make sure the userscript is <b>Enabled</b> in Tampermonkey’s Dashboard.</li>
+        <li>Ensure the tab URL matches the script’s <code>@match</code> lines (e.g., <code>https://app.phrase.com/…</code>).</li>
+        <li>Open the browser console (F12 → Console) and check for red error messages.</li>
+        <li>If your team uses multiple Phrase domains, add extra <code>@match</code> lines as needed.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const payloadTag = document.getElementById('payload');   // <script type="text/plain">
+      const codeblock  = document.getElementById('codeblock'); // <code> preview
+      const btn        = document.getElementById('copyCodeBtn');
+
+      // Read the userscript as raw text (safe; not parsed/executed)
+      const userscript = (payloadTag && payloadTag.textContent) ? payloadTag.textContent.trim() : '';
+
+      // Show in the visible code box (use textContent for safety)
+      codeblock.textContent = userscript || '(no script pasted yet)';
+
+      btn.addEventListener('click', async () => {
+        const text = userscript || '';
+        if (!text) { btn.textContent = 'Nothing to copy'; setTimeout(()=>btn.textContent='Copy code', 1300); return; }
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy code', 1400);
+        } catch (e) {
+          // Fallback
+          const ta = document.createElement('textarea');
+          ta.value = text; ta.style.position = 'fixed'; ta.style.left='-9999px'; ta.style.top='-9999px';
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          btn.textContent = ok ? 'Copied!' : 'Select & Ctrl+C';
+          setTimeout(() => btn.textContent = 'Copy code', 1400);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
