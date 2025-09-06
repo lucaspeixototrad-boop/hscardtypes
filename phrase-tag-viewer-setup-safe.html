@@ -100,6 +100,16 @@
   let ui, showBtn, lastActive = null;
   let PTV_SELECTING = false;
   const PTV_RENDER_CACHE = { plain: '', html: '' };
+    // Brief visual press feedback for buttons
+function addClickFeedback(btn){
+  if (!btn || btn.dataset._ptvClickFx) return;
+  btn.dataset._ptvClickFx = '1';
+  btn.addEventListener('click', () => {
+    btn.classList.add('ptv-pressed');
+    setTimeout(() => btn.classList.remove('ptv-pressed'), 150);
+  }, true);
+}
+
 
   /* ===================== UI ===================== */
   function ensureUI() {
@@ -183,6 +193,22 @@
       /* Selection: allow text dragging fully */
       #hs-pretty, #hs-pretty *{-webkit-user-select:text!important;-moz-user-select:text!important;user-select:text!important;pointer-events:auto!important}
       #hs-pretty{cursor:text}
+      /* Smooth pressed feedback for buttons */
+#hs-copybox button{
+  transition: transform 120ms ease, filter 120ms ease, background-color 120ms ease;
+}
+
+/* When mouse is held down */
+#hs-copybox button:active{
+  transform: translateY(1px) scale(0.99);
+  filter: brightness(0.96);
+}
+
+/* Brief pressed flash triggered by JS (for clicks that complete instantly) */
+#hs-copybox button.ptv-pressed{
+  transform: translateY(1px) scale(0.98);
+  filter: brightness(0.92);
+}
     `;
     document.documentElement.append(style, ui);
 
@@ -221,6 +247,7 @@
       } catch {
         const ta = $('#hs-out'); if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
       }
+        addClickFeedback($('#hs-copybtn'));
     });
 
     // Font size controller
@@ -253,6 +280,7 @@
     if (PTV_RENDER_CACHE.plain === (plain||'') && PTV_RENDER_CACHE.html === (html||'')) return; // no-op
     PTV_RENDER_CACHE.plain = plain || ''; PTV_RENDER_CACHE.html = html || '';
     pretty.innerHTML = PTV_RENDER_CACHE.html; ta.value = PTV_RENDER_CACHE.plain;
+      addClickFeedback($('#hs-hide'));
   };
 
   /* ===================== Decoding / conversion ===================== */
