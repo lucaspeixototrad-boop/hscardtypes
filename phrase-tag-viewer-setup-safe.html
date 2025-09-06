@@ -75,13 +75,13 @@
 // ==UserScript==
 // @name         Phrase Tag Viewer
 // @namespace    hs.phrase.copyexport
-// @version      1.0.2
-// @description  Copy-ready export of active Phrase target segment: tag widgets → display values (mq:rxt) and bpt/ept inner markup; strip {123}→123; colored tags by theme; light/dark with memory; iframe-safe.
+// @version      1.0.3
+// @description  Copy-ready export of active Phrase target segment: tag widgets → values (mq:rxt) and bpt/ept inner markup; strip {123}→123; colored tags by theme; light/dark w/ memory; iframe-safe; selection-safe.
 // @match        https://app.phrase.com/*
 // @match        https://*.phrase.com/*
 // @match        https://cloud.memsource.com/*
 // @match        https://*.memsource.com/*
-// @exclude      https://cloud.memsource.com/web/project/list*
+// @exclude      https://cloud.memsource.com/web/project*
 // @exclude      https://cloud.memsource.com/web/job2/list*
 // @exclude      https://cloud.memsource.com/tms/transMemory/list*
 // @exclude      https://cloud.memsource.com/tms/setup/*
@@ -91,515 +91,300 @@
 // ==/UserScript==
 
 (() => {
-  // ---------- Base ----------
+  /* ===================== Base / utils ===================== */
   const IS_TOP = window.top === window;
   const ORIGIN_ID = `${location.origin}${location.pathname}`;
   const THEME_KEY = 'ptv-theme'; // 'light' | 'dark'
   const $ = (s, r = document) => r.querySelector(s);
 
-  // store last payload received from frames
-  let lastActive = null;
+  let ui, showBtn, lastActive = null;
+  let PTV_SELECTING = false;
+  const PTV_RENDER_CACHE = { plain: '', html: '' };
 
-  // ---------- UI ----------
-  let ui, showBtn;
-
+  /* ===================== UI ===================== */
   function ensureUI() {
     if (!IS_TOP) return;
+    if ($('#hs-copybox')) { ui = $('#hs-copybox'); showBtn = $('#hs-showbtn'); return; }
 
-    if (!$('#hs-copybox')) {
-      ui = document.createElement('div');
-      ui.id = 'hs-copybox';
-      ui.innerHTML = `
-        <div class="hs-head">
-          <strong>Phrase Tag Viewer</strong>
-          <div class="hs-menu">
-            <div class="hs-fontctrl" title="Preview font size (px)">
-              <label for="hs-fs" class="hs-fs-label">A</label>
-              <input id="hs-fs" type="number" min="10" max="48" step="1" value="14" />
-            </div>
-            <label class="hs-theme-toggle" title="Toggle dark mode">
-              <input id="hs-theme" type="checkbox"/>
-              <span>Dark</span>
-            </label>
-          </div>
+    ui = document.createElement('div');
+    ui.id = 'hs-copybox';
+    ui.innerHTML = `
+      <div class="hs-head">
+        <strong>Phrase Tag Viewer</strong>
+        <div class="hs-menu">
+          <label class="hs-fontctrl" title="Preview font size (px)">
+            <span class="hs-fs-label">A</span>
+            <input id="hs-fs" type="number" min="10" max="48" step="1" value="14"/>
+          </label>
+          <label class="hs-theme-toggle" title="Toggle dark mode">
+            <input id="hs-theme" type="checkbox"/><span>Dark</span>
+          </label>
         </div>
-
-        <div id="hs-body">
-          <div class="hs-textwrap">
-            <div id="hs-pretty" aria-label="Converted preview" tabindex="0"></div>
-            <textarea id="hs-out" aria-hidden="true"></textarea>
-          </div>
-          <div class="hs-buttons">
-            <button id="hs-copybtn" title="Copy to clipboard">Copy</button>
-            <button id="hs-hide" title="Hide panel">Hide</button>
-          </div>
+      </div>
+      <div id="hs-body">
+        <div class="hs-textwrap">
+          <div id="hs-pretty" aria-label="Converted preview" tabindex="0"></div>
+          <textarea id="hs-out" aria-hidden="true"></textarea>
         </div>
-      `;
+        <div class="hs-buttons">
+          <button id="hs-copybtn" title="Copy to clipboard">Copy</button>
+          <button id="hs-hide" title="Hide panel">Hide</button>
+        </div>
+      </div>`;
 
-      Object.assign(ui.style, {
-        position: 'fixed',
-        left: '12px',
-        bottom: '40px',
-        width: '1420px',
-        height: '110px',
-        maxWidth: '98vw',
-        zIndex: 2147483647,
-        borderRadius: '10px',
-        boxShadow: '0 8px 24px rgba(0,0,0,.4)',
-        font: '12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-        padding: '10px',
-        display: 'flex',
-        flexDirection: 'column'
-      });
+    Object.assign(ui.style, {
+      position:'fixed', left:'12px', bottom:'40px', width:'1420px', height:'110px', maxWidth:'98vw',
+      zIndex:2147483647, borderRadius:'10px', boxShadow:'0 8px 24px rgba(0,0,0,.4)',
+      font:'12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif', padding:'10px',
+      display:'flex', flexDirection:'column'
+    });
 
-      const style = document.createElement('style');
-      style.textContent = `
-        /* ---------- Layout ---------- */
-        #hs-copybox .hs-head{
-          display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;min-height:20px
-        }
-        #hs-copybox .hs-menu{ display:flex;gap:10px;align-items:center }
-        #hs-body{ display:flex;gap:6px;flex:1;min-height:0; }
-        #hs-body .hs-textwrap{ flex:1;display:flex;min-width:0; }
-        #hs-pretty{
-          width:100%;height:100%;
-          border-radius:8px;padding:6px;
-          box-sizing:border-box;overflow:auto;
-          white-space:pre-wrap;word-break:break-word;
-          font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;
-          line-height:1.4; font-size:14px; /* controlled by input */
-        }
-        #hs-out{ display:none; } /* hidden textarea for copy */
+    const style = document.createElement('style');
+    style.textContent = `
+      /* Layout */
+      #hs-copybox .hs-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;min-height:20px}
+      #hs-copybox .hs-menu{display:flex;gap:10px;align-items:center}
+      #hs-body{display:flex;gap:6px;flex:1;min-height:0}
+      #hs-body .hs-textwrap{flex:1;display:flex;min-width:0}
+      #hs-pretty{width:100%;height:100%;border-radius:8px;padding:6px;box-sizing:border-box;overflow:auto;white-space:pre-wrap;word-break:break-word;line-height:1.4;font-size:14px;
+        font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif}
+      #hs-out{display:none}
+      #hs-copybox .hs-buttons{display:flex;flex-direction:column;gap:6px;align-items:stretch;justify-content:flex-start;min-width:110px}
+      #hs-copybox button{border-radius:6px;cursor:pointer;font-size:12px;line-height:1;height:32px;padding:6px 10px;min-width:72px}
+      /* Font size control */
+      #hs-copybox .hs-fontctrl{display:flex;align-items:center;gap:4px;user-select:none}
+      #hs-copybox .hs-fs-label{font-weight:700;opacity:.85;display:inline-block;width:14px;text-align:center;font-size:12px}
+      #hs-copybox #hs-fs{width:56px;height:24px;border-radius:6px;padding:2px 6px;font-size:12px}
+      /* Theme toggle */
+      #hs-copybox .hs-theme-toggle{display:inline-flex;align-items:center;gap:6px;user-select:none;cursor:pointer;font-size:12px}
+      #hs-copybox .hs-theme-toggle input{margin:0}
+      /* Show button */
+      #hs-showbtn{position:fixed;z-index:2147483647;border-radius:999px;padding:6px 10px;cursor:pointer;font:12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+      #hs-showbtn.hidden{display:none!important}
+      /* Theme: light (default) */
+      #hs-copybox.ptv-light{background:#f7f8fa;color:#0b0f12;border:1px solid #cfd8e3}
+      #hs-copybox.ptv-light #hs-pretty{background:#fff;color:#111827;border:1px solid #cfd8e3}
+      #hs-copybox.ptv-light .hs-taglit{color:#1d4ed8;font-weight:600}
+      #hs-copybox.ptv-light button{background:#eef2f7;color:#0b0f12;border:1px solid #cbd5e1}
+      #hs-copybox.ptv-light button:hover{background:#e6edf7}
+      #hs-copybox.ptv-light #hs-fs{background:#fff;color:#0b0f12;border:1px solid #cbd5e1}
+      #hs-showbtn.ptv-light{background:#eef2f7;color:#0b0f12;border:1px solid #cbd5e1}
+      #hs-showbtn.ptv-light:hover{background:#e6edf7}
+      /* Theme: dark */
+      #hs-copybox.ptv-dark{background:#0b0f12;color:#d7e2ea;border:1px solid #1f2a33}
+      #hs-copybox.ptv-dark #hs-pretty{background:#0e1317;color:#e8f3ff;border:1px solid #1e2a33}
+      #hs-copybox.ptv-dark .hs-taglit{color:#f6c560;font-weight:600}
+      #hs-copybox.ptv-dark button{background:#10202a;color:#bfe8ff;border:1px solid #1e2f3a}
+      #hs-copybox.ptv-dark button:hover{background:#143040}
+      #hs-copybox.ptv-dark #hs-fs{background:#0e1317;color:#e8f3ff;border:1px solid #1e2a33}
+      #hs-copybox.hidden{display:none!important}
+      #hs-showbtn.ptv-dark{background:#10202a;color:#bfe8ff;border:1px solid #1e2f3a}
+      #hs-showbtn.ptv-dark:hover{background:#143040}
+      /* Selection: allow text dragging fully */
+      #hs-pretty, #hs-pretty *{-webkit-user-select:text!important;-moz-user-select:text!important;user-select:text!important;pointer-events:auto!important}
+      #hs-pretty{cursor:text}
+    `;
+    document.documentElement.append(style, ui);
 
-        #hs-copybox .hs-buttons{
-          display:flex;flex-direction:column;gap:6px;align-items:stretch;justify-content:flex-start;
-          min-width:110px;
-        }
-
-        /* ---------- Buttons (compact width, comfy height) ---------- */
-        #hs-copybox button{
-          border-radius:6px; cursor:pointer;
-          font-size:12px; line-height:1; height:32px;
-          padding:6px 10px; min-width:72px;
-        }
-
-        /* ---------- Font size control (top menu) ---------- */
-        #hs-copybox .hs-fontctrl{ display:flex;align-items:center;gap:4px }
-        #hs-copybox .hs-fs-label{
-          font-weight:700; opacity:.85; display:inline-block; width:14px; text-align:center; font-size:12px;
-        }
-        #hs-copybox #hs-fs{
-          width:56px;height:24px;border-radius:6px;padding:2px 6px;font-size:12px
-        }
-
-        /* ---------- Theme toggle ---------- */
-        #hs-copybox .hs-theme-toggle{
-          display:inline-flex;align-items:center;gap:6px;user-select:none;cursor:pointer;font-size:12px
-        }
-        #hs-copybox .hs-theme-toggle input{ margin:0 }
-
-        /* ---------- Show button (near Hide) ---------- */
-        #hs-showbtn{
-          position:fixed; z-index:2147483647; border-radius:999px;
-          padding:6px 10px; cursor:pointer; font:12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-          box-shadow:0 8px 24px rgba(0,0,0,.4)
-        }
-        #hs-showbtn.hidden{ display:none!important }
-
-        /* ---------- THEME: LIGHT (default) ---------- */
-        #hs-copybox.ptv-light{
-          background:#f7f8fa; color:#0b0f12; border:1px solid #cfd8e3;
-        }
-        #hs-copybox.ptv-light #hs-pretty{
-          background:#ffffff; color:#111827; border:1px solid #cfd8e3;
-        }
-        #hs-copybox.ptv-light .hs-taglit{ color:#1d4ed8; font-weight:600; }
-        #hs-copybox.ptv-light button{
-          background:#eef2f7; color:#0b0f12; border:1px solid #cbd5e1;
-        }
-        #hs-copybox.ptv-light button:hover{ background:#e6edf7 }
-        #hs-copybox.ptv-light #hs-fs{ background:#ffffff; color:#0b0f12; border:1px solid #cbd5e1 }
-        #hs-showbtn.ptv-light{
-          background:#eef2f7; color:#0b0f12; border:1px solid #cbd5e1;
-        }
-        #hs-showbtn.ptv-light:hover{ background:#e6edf7 }
-
-        /* ---------- THEME: DARK ---------- */
-        #hs-copybox.ptv-dark{
-          background:#0b0f12; color:#d7e2ea; border:1px solid #1f2a33;
-        }
-        #hs-copybox.ptv-dark #hs-pretty{
-          background:#0e1317; color:#e8f3ff; border:1px solid #1e2a33;
-        }
-        #hs-copybox.ptv-dark .hs-taglit{ color:#f6c560; font-weight:600; }
-        #hs-copybox.ptv-dark button{
-          background:#10202a; color:#bfe8ff; border:1px solid #1e2f3a;
-        }
-        #hs-copybox.ptv-dark button:hover{ background:#143040 }
-        #hs-copybox.ptv-dark #hs-fs{ background:#0e1317; color:#e8f3ff; border:1px solid #1e2a33 }
-        #hs-copybox.hidden { display: none !important; }
-        #hs-showbtn.ptv-dark{
-          background:#10202a; color:#bfe8ff; border:1px solid #1e2f3a;
-        }
-        #hs-showbtn.ptv-dark:hover{ background:#143040 }
-      `;
-      document.documentElement.append(style, ui);
-
-      // Persistent Show button
-      showBtn = document.createElement('button');
-      showBtn.id = 'hs-showbtn';
-      showBtn.textContent = 'Show';
-      showBtn.className = 'hidden';
-      document.documentElement.appendChild(showBtn);
-
-      // Theme: load + apply
-      const themeInput = $('#hs-theme');
-      function applyTheme(theme) {
-        ui.classList.toggle('ptv-light', theme === 'light');
-        ui.classList.toggle('ptv-dark', theme === 'dark');
-        showBtn.classList.toggle('ptv-light', theme === 'light');
-        showBtn.classList.toggle('ptv-dark', theme === 'dark');
-        localStorage.setItem(THEME_KEY, theme);
-        themeInput.checked = (theme === 'dark');
-      }
-      const savedTheme = localStorage.getItem(THEME_KEY) || 'light';
-      applyTheme(savedTheme);
-      themeInput.addEventListener('change', () => {
-        applyTheme(themeInput.checked ? 'dark' : 'light');
-      });
-
-      // Copy button (cross-browser)
-      const copyToClipboard = async () => {
-        const ta = $('#hs-out');
-        const text = ta ? ta.value : '';
-        try {
-          if (typeof GM_setClipboard === 'function') {
-            GM_setClipboard(text, { type: 'text', mimetype: 'text/plain' });
-            return;
-          }
-          await navigator.clipboard.writeText(text);
-        } catch {
-          if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
-        }
-      };
-      $('#hs-copybtn').addEventListener('click', copyToClipboard);
-
-      // Font size controller → affects preview font size
-      const fsInput = $('#hs-fs');
-      const applyFs = () => {
-        const px = Math.max(10, Math.min(48, Number(fsInput.value || 14) || 14));
-        const pretty = $('#hs-pretty');
-        if (pretty) pretty.style.fontSize = px + 'px';
-      };
-      fsInput.addEventListener('change', applyFs);
-      fsInput.addEventListener('input', applyFs);
-      applyFs();
-
-      // Show button positioning near Hide
-      function positionShowButtonNearHide() {
-        if (!ui || !showBtn) return;
-        const r = ui.getBoundingClientRect();
-        const leftPx = Math.round(r.left + r.width - 88); // near right edge
-        const bottomPx = Math.max(8, Math.round(window.innerHeight - r.bottom));
-        showBtn.style.left = leftPx + 'px';
-        showBtn.style.bottom = bottomPx + 'px';
-      }
-
-      // Hide / Show toggles
-      const doHide = () => {
-        positionShowButtonNearHide();
-        ui.classList.add('hidden');
-        showBtn.classList.remove('hidden');
-      };
-      const doShow = () => {
-        ui.classList.remove('hidden');
-        showBtn.classList.add('hidden');
-      };
-      $('#hs-hide').addEventListener('click', doHide);
-      showBtn.addEventListener('click', doShow);
-
-      // Reposition show button when window resizes (while hidden)
-      window.addEventListener('resize', () => {
-        if (!ui.classList.contains('hidden')) return;
-        positionShowButtonNearHide();
-      });
-
-      // Keyboard toggle (Alt+P)
-      window.addEventListener('keydown', e => {
-        if (e.altKey && (e.key === 'p' || e.key === 'P')) {
-          if (ui.classList.contains('hidden')) doShow(); else doHide();
-        }
-      }, true);
-    } else {
-      ui = $('#hs-copybox');
-      showBtn = $('#hs-showbtn');
-    }
-  }
-
-  const setPreview = (plain, html) => {
-    const pretty = $('#hs-pretty');
-    const ta = $('#hs-out');
-    if (pretty) pretty.innerHTML = html || '';
-    if (ta) ta.value = plain || '';
-  };
-
-  // ---------- Decoding + helpers ----------
-  const decodeHtml = (s) => {
-    const t = document.createElement('textarea');
-    t.innerHTML = s;
-    return t.value;
-  };
-  const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, ch =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])
-  );
-
-  // "{123}" → "123" (numbers only; leaves "{i}" etc. untouched)
-  function stripNumericBraces(s) {
-    return String(s ?? '').replace(/\{(\d+)\}/g, '$1');
-  }
-
-  // Extract Phrase tag content:
-  // - mq:rxt (ph): use displaytext or val (decoded)
-  // - bpt/ept: inner payload between <bpt>...</bpt> or <ept>...</ept> (decoded)
-  // - generic: any <tag>payload</tag> inner text decoded
-  // - fallback: data-tag-content (e.g., "{3}")
-  function extractPhraseTagValue(el) {
-    const meta =
-      el.querySelector?.('.tag_metadata_content')?.textContent ||
-      el.getAttribute?.('tmp-title') ||
-      el.getAttribute?.('title') ||
-      '';
-    if (!meta) return { text: '', fromTag: true };
-
-    const un1 = decodeHtml(meta);
-
-    // A) mq:rxt
-    let m = un1.match(/displaytext="([^"]*)"/i);
-    if (m) return { text: decodeHtml(m[1] || ''), fromTag: true };
-    m = un1.match(/val="([^"]*)"/i);
-    if (m) return { text: decodeHtml(m[1] || ''), fromTag: true };
-
-    // B) bpt/ept
-    let innerMatch =
-      un1.match(/<bpt\b[^>]*>([\s\S]*?)<\/bpt>/i) ||
-      un1.match(/<ept\b[^>]*>([\s\S]*?)<\/ept>/i);
-    if (innerMatch) {
-      return { text: decodeHtml(innerMatch[1] || ''), fromTag: true };
+    // Bind once: selection guard to prevent mid-drag rerenders
+    const prettyEl = $('#hs-pretty');
+    if (prettyEl && !prettyEl.dataset._ptvBound) {
+      prettyEl.dataset._ptvBound = '1';
+      prettyEl.addEventListener('mousedown', () => { PTV_SELECTING = true; }, true);
+      window.addEventListener('mouseup', () => { PTV_SELECTING = false; }, true);
     }
 
-    // C) generic <tag>payload</tag>
-    innerMatch = un1.match(/<\w+\b[^>]*>([\s\S]*?)<\/\w+>/i);
-    if (innerMatch) {
-      return { text: decodeHtml(innerMatch[1] || ''), fromTag: true };
-    }
+    // Persistent Show button
+    showBtn = document.createElement('button');
+    showBtn.id = 'hs-showbtn'; showBtn.textContent = 'Show'; showBtn.className = 'hidden';
+    document.documentElement.appendChild(showBtn);
 
-    // D) placeholder fallback
-    const ph = el.getAttribute?.('data-tag-content') || '';
-    return { text: ph, fromTag: true };
-  }
+    // Theme
+    const themeInput = $('#hs-theme');
+    const applyTheme = t => {
+      ui.classList.toggle('ptv-light', t==='light');
+      ui.classList.toggle('ptv-dark', t==='dark');
+      showBtn.classList.toggle('ptv-light', t==='light');
+      showBtn.classList.toggle('ptv-dark', t==='dark');
+      localStorage.setItem(THEME_KEY, t);
+      themeInput.checked = (t === 'dark');
+    };
+    applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+    themeInput.addEventListener('change', () => applyTheme(themeInput.checked ? 'dark' : 'light'));
 
-  // Build both plain and HTML (colored for tag-derived pieces)
-  function rebuildConvertedRich(container) {
-    if (!container) return { plain: '', html: '' };
-
-    let plain = '';
-    let html = '';
-
-    container.childNodes.forEach(n => {
-      if (n.nodeType === 3) {
-        const t = n.nodeValue || '';
-        plain += t;
-        html  += escapeHtml(t);
-        return;
-      }
-      if (n.nodeType === 1) {
-        const el = n;
-        if (el.classList?.contains('te_txt')) {
-          const t = el.textContent || '';
-          plain += t;
-          html  += escapeHtml(t);
-          return;
-        }
-        if (el.classList?.contains('te_tag') || el.matches?.('[data-testid="tag"], [data-tag], [data-tag-type]')) {
-          const { text, fromTag } = extractPhraseTagValue(el);
-
-          if (!fromTag) { // future-proof
-            plain += text;
-            html  += escapeHtml(text);
-            return;
-          }
-
-          // If tag text is "{123}", show 123 (colored), and add 123 to plain
-          const m = /^\{(\d+)\}$/.exec(text);
-          if (m) {
-            const num = m[1];
-            plain += num;
-            html  += `<span class="hs-taglit">${escapeHtml(num)}</span>`;
-            return;
-          }
-
-          plain += text;
-          html  += `<span class="hs-taglit">${escapeHtml(text)}</span>`;
-          return;
-        }
+    // Copy
+    $('#hs-copybtn').addEventListener('click', async () => {
+      const text = $('#hs-out')?.value || '';
+      try {
+        if (typeof GM_setClipboard === 'function') return GM_setClipboard(text, { type:'text', mimetype:'text/plain' });
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const ta = $('#hs-out'); if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
       }
     });
 
-    // Global numeric-brace strip as final pass (keeps previous behavior)
-    plain = stripNumericBraces(plain);
-    return { plain, html };
+    // Font size controller
+    const fsInput = $('#hs-fs'), applyFs = () => {
+      const px = Math.max(10, Math.min(48, Number(fsInput.value || 14) || 14));
+      const pretty = $('#hs-pretty'); if (pretty) pretty.style.fontSize = px + 'px';
+    };
+    fsInput.addEventListener('input', applyFs);
+    fsInput.addEventListener('change', applyFs);
+    applyFs();
+
+    // Show button near panel's right edge
+    const positionShowButtonNearHide = () => {
+      if (!ui || !showBtn) return;
+      const r = ui.getBoundingClientRect();
+      showBtn.style.left = Math.round(r.left + r.width - 88) + 'px';
+      showBtn.style.bottom = Math.max(8, Math.round(window.innerHeight - r.bottom)) + 'px';
+    };
+
+    // Hide/Show
+    $('#hs-hide').addEventListener('click', () => { positionShowButtonNearHide(); ui.classList.add('hidden'); showBtn.classList.remove('hidden'); });
+    showBtn.addEventListener('click', () => { ui.classList.remove('hidden'); showBtn.classList.add('hidden'); });
+    window.addEventListener('resize', () => { if (ui.classList.contains('hidden')) positionShowButtonNearHide(); });
+    window.addEventListener('keydown', e => { if (e.altKey && (e.key==='p'||e.key==='P')) ui.classList.contains('hidden') ? showBtn.click() : $('#hs-hide').click(); }, true);
   }
 
-  // ---------- Active row detection ----------
-  const finders = {
-    byCaret(doc) { const c = doc.getElementById?.('segment-text-editor-input'); return c ? c.closest('.twe_segment') : null; },
-    byCursor(doc) { const cur = doc.querySelector?.('.twe_segment .twe_target .te_selection_container .te_cursor'); return cur ? cur.closest('.twe_segment') : null; },
-    byFocusedInput(doc) {
-      const ae = doc.activeElement;
-      if (!ae) return null;
-      if (ae.matches?.('input.twe-main-input, textarea.twe-main-input, [contenteditable="true"]')) {
-        return ae.closest('.twe_segment') || ae.closest('[data-testid="segment"]') || null;
+  const setPreview = (plain, html) => {
+    const pretty = $('#hs-pretty'), ta = $('#hs-out');
+    if (!pretty || !ta) return;
+    if (PTV_RENDER_CACHE.plain === (plain||'') && PTV_RENDER_CACHE.html === (html||'')) return; // no-op
+    PTV_RENDER_CACHE.plain = plain || ''; PTV_RENDER_CACHE.html = html || '';
+    pretty.innerHTML = PTV_RENDER_CACHE.html; ta.value = PTV_RENDER_CACHE.plain;
+  };
+
+  /* ===================== Decoding / conversion ===================== */
+  const decodeHtml = s => { const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
+  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const stripNumericBraces = s => String(s ?? '').replace(/\{(\d+)\}/g, '$1'); // "{123}" → "123"
+
+  function extractPhraseTagValue(el) {
+    const meta = el.querySelector?.('.tag_metadata_content')?.textContent || el.getAttribute?.('tmp-title') || el.getAttribute?.('title') || '';
+    if (!meta) return { text:'', fromTag:true };
+    const un = decodeHtml(meta);
+    // mq:rxt
+    let m = un.match(/displaytext="([^"]*)"/i) || un.match(/val="([^"]*)"/i);
+    if (m) return { text: decodeHtml(m[1]||''), fromTag:true };
+    // bpt/ept
+    let inner = un.match(/<(?:bpt|ept)\b[^>]*>([\s\S]*?)<\/(?:bpt|ept)>/i) || un.match(/<\w+\b[^>]*>([\s\S]*?)<\/\w+>/i);
+    if (inner) return { text: decodeHtml(inner[1]||''), fromTag:true };
+    // placeholder fallback
+    return { text: el.getAttribute?.('data-tag-content') || '', fromTag:true };
+  }
+
+  function rebuildConvertedRich(container) {
+    if (!container) return { plain:'', html:'' };
+    let plain = '', html = '';
+    container.childNodes.forEach(n => {
+      if (n.nodeType === 3) { const t = n.nodeValue || ''; plain += t; html += escapeHtml(t); return; }
+      if (n.nodeType !== 1) return;
+      const el = n;
+      if (el.classList?.contains('te_txt')) {
+        const t = el.textContent || ''; plain += t; html += escapeHtml(t); return;
       }
-      return null;
+      if (el.classList?.contains('te_tag') || el.matches?.('[data-testid="tag"],[data-tag],[data-tag-type]')) {
+        const { text } = extractPhraseTagValue(el);
+        const m = /^\{(\d+)\}$/.exec(text);
+        if (m) { const num = m[1]; plain += num; html += `<span class="hs-taglit">${escapeHtml(num)}</span>`; }
+        else { plain += text; html += `<span class="hs-taglit">${escapeHtml(text)}</span>`; }
+      }
+    });
+    return { plain: stripNumericBraces(plain), html };
+  }
+
+  /* ===================== Active row ===================== */
+  const finders = {
+    byCaret: d => d.getElementById?.('segment-text-editor-input')?.closest?.('.twe_segment') || null,
+    byCursor: d => d.querySelector?.('.twe_segment .twe_target .te_selection_container .te_cursor')?.closest?.('.twe_segment') || null,
+    byFocusedInput(d) {
+      const a = d.activeElement; if (!a) return null;
+      return a.matches?.('input.twe-main-input, textarea.twe-main-input, [contenteditable="true"]')
+        ? (a.closest('.twe_segment') || a.closest('[data-testid="segment"]') || null) : null;
     },
-    byActiveClass(doc) { return doc.querySelector?.('.twe_segment.twe_active, .twe_segment.twe_active_background, [data-testid="segment"][data-selected="true"]'); }
+    byActiveClass: d => d.querySelector?.('.twe_segment.twe_active, .twe_segment.twe_active_background, [data-testid="segment"][data-selected="true"]')
   };
 
   function readActiveFromDoc(doc) {
     const row = finders.byCaret(doc) || finders.byCursor(doc) || finders.byFocusedInput(doc) || finders.byActiveClass(doc);
-    if (!row) return { row: null, plain: '', html: '' };
-
-    const cont =
-      row.querySelector?.('.twe_target .te_text_container') ||
-      row.querySelector?.('[data-testid="target"] .te_text_container') ||
-      row.querySelector?.('.twe_target [data-role="text-container"]');
-
-    const live = row.querySelector?.('.twe_target .twe-main-input, textarea.twe-main-input, [contenteditable="true"]');
-
+    if (!row) return { row:null, plain:'', html:'' };
+    const cont = row.querySelector?.('.twe_target .te_text_container') ||
+                 row.querySelector?.('[data-testid="target"] .te_text_container') ||
+                 row.querySelector?.('.twe_target [data-role="text-container"]');
     if (cont) return { row, ...rebuildConvertedRich(cont) };
-
+    const live = row.querySelector?.('.twe_target .twe-main-input, textarea.twe-main-input, [contenteditable="true"]');
     const raw = (live && (live.value || live.textContent)) || '';
-    const escaped = escapeHtml(raw);
-    return { row, plain: stripNumericBraces(raw), html: escaped };
+    return { row, plain: stripNumericBraces(raw), html: escapeHtml(raw) };
   }
 
-  // ---------- Same-origin iframe sweep ----------
+  /* ===================== Iframes (same-origin sweep) ===================== */
   function getAllDocs(rootDoc = document, acc = new Set()) {
-    if (!rootDoc || acc.has(rootDoc)) return { docs: Array.from(acc), totalFrames: 0, okFrames: 0 };
+    if (!rootDoc || acc.has(rootDoc)) return { docs: Array.from(acc), totalFrames:0, okFrames:0 };
     acc.add(rootDoc);
-    const iframes = rootDoc.querySelectorAll('iframe');
-    let total = 0, ok = 0;
-    for (const f of iframes) {
+    const ifr = rootDoc.querySelectorAll('iframe'); let total=0, ok=0;
+    for (const f of ifr) {
       total++;
       try {
         const d = f.contentDocument || f.contentWindow?.document;
-        if (d) {
-          ok++;
-          const nested = getAllDocs(d, acc);
-          total += nested.totalFrames; ok += nested.okFrames;
-        }
-      } catch (e) {}
+        if (d) { ok++; const nested = getAllDocs(d, acc); total += nested.totalFrames; ok += nested.okFrames; }
+      } catch {}
     }
-    return { docs: Array.from(acc), totalFrames: total, okFrames: ok };
+    return { docs: Array.from(acc), totalFrames:total, okFrames:ok };
   }
 
-  // ---------- Bridge ----------
+  /* ===================== Bridge ===================== */
   const MSG_MARK = '__hs_bridge__';
-
-  function postToChildren(msg) {
-    if (!IS_TOP) return;
-    for (let i = 0; i < window.frames.length; i++) {
-      try { window.frames[i].postMessage({ [MSG_MARK]: true, ...msg }, '*'); } catch (e) {}
-    }
-  }
-  function postToParent(msg) {
-    if (IS_TOP) return;
-    try { window.parent.postMessage({ [MSG_MARK]: true, ...msg }, '*'); } catch (e) {}
-  }
+  const postToChildren = msg => { if (!IS_TOP) return; for (let i=0;i<window.frames.length;i++) { try { window.frames[i].postMessage({[MSG_MARK]:true, ...msg}, '*'); } catch {} } };
+  const postToParent = msg => { if (IS_TOP) return; try { window.parent.postMessage({[MSG_MARK]:true, ...msg}, '*'); } catch {} };
 
   window.addEventListener('message', e => {
-    const d = e?.data;
-    if (!d || !d[MSG_MARK]) return;
-
+    const d = e?.data; if (!d || !d[MSG_MARK]) return;
     if (IS_TOP) {
       if (d.type === 'ACTIVE') {
-        // accept {plain, html} (or legacy {text, html})
-        lastActive = {
-          plain: (d.payload && (d.payload.plain ?? d.payload.text)) || '',
-          html:  (d.payload && d.payload.html) || ''
-        };
-        ensureUI();
-        render();
+        lastActive = { plain: (d.payload?.plain ?? d.payload?.text) || '', html: d.payload?.html || '' };
+        ensureUI(); render();
       }
     } else {
-      if (d.type === 'PING') postToParent({ type: 'PONG', frameId: ORIGIN_ID, info: 'editor-frame' });
+      if (d.type === 'PING') postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'editor-frame' });
       if (d.type === 'REQUEST_ACTIVE') {
-        const res = readActiveFromDoc(document);
-        postToParent({
-          type: 'ACTIVE', frameId: ORIGIN_ID, info: 'editor-frame',
-          payload: { plain: res.plain || '', html: res.html || '' }
-        });
+        const r = readActiveFromDoc(document);
+        postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{ plain:r.plain||'', html:r.html||'' } });
       }
     }
   }, true);
 
-  // ---------- Render/update ----------
+  /* ===================== Render/update ===================== */
   function render() {
-    if (!IS_TOP) return;
+    if (!IS_TOP || PTV_SELECTING) return;
     ensureUI();
-
-    // try same-origin first
+    // same-origin first
     const { docs } = getAllDocs(document);
     let found = null;
-    for (const d of docs) {
-      const res = readActiveFromDoc(d);
-      if (res.row) { found = res; break; }
-    }
-
-    // then fall back to last iframe payload
+    for (const d of docs) { const r = readActiveFromDoc(d); if (r.row) { found = r; break; } }
     const active = found || lastActive || null;
-    const plain = active?.plain || '';
-    const html  = active?.html  || '';
-
-    setPreview(plain, html);
+    setPreview(active?.plain || '', active?.html || '');
   }
 
   function wireInstantSignals() {
     const instant = () => { IS_TOP ? render() : tickFrame(); };
-    ['input','keyup','selectionchange','pointerup','focusin'].forEach(ev =>
-      document.addEventListener(ev, instant, true)
-    );
+    ['input','keyup','selectionchange','pointerup','focusin'].forEach(ev => document.addEventListener(ev, instant, true));
   }
 
-  function tickTop() {
-    postToChildren({ type: 'PING' });
-    postToChildren({ type: 'REQUEST_ACTIVE' });
-    render();
-  }
+  function tickTop() { postToChildren({type:'PING'}); postToChildren({type:'REQUEST_ACTIVE'}); render(); }
   function tickFrame() {
-    const res = readActiveFromDoc(document);
-    if (res && (res.row || res.plain || res.html)) {
-      postToParent({
-        type: 'ACTIVE', frameId: ORIGIN_ID, info: 'editor-frame',
-        payload: { plain: res.plain || '', html: res.html || '' }
-      });
-    } else {
-      postToParent({ type: 'PONG', frameId: ORIGIN_ID, info: 'probe' });
-    }
+    const r = readActiveFromDoc(document);
+    if (r && (r.row || r.plain || r.html)) postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{ plain:r.plain||'', html:r.html||'' } });
+    else postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'probe' });
   }
 
-  // ---------- Boot ----------
+  /* ===================== Boot ===================== */
   function boot() {
-    if (IS_TOP) {
-      ensureUI();
-      wireInstantSignals();
-      setTimeout(tickTop, 300);
-      setInterval(tickTop, 350);
-    } else {
-      wireInstantSignals();
-      setTimeout(tickFrame, 300);
-      setInterval(tickFrame, 300);
-    }
+    if (IS_TOP) ensureUI();
+    wireInstantSignals();
+    const tick = IS_TOP ? tickTop : tickFrame;
+    setTimeout(tick, 300);
+    setInterval(tick, 350);
   }
   boot();
 })();
