@@ -75,8 +75,8 @@
 // ==UserScript==
 // @name         Phrase Tag Viewer
 // @namespace    hs.phrase.copyexport
-// @version      1.0.3
-// @description  Copy-ready export of active Phrase target segment: tag widgets → values (mq:rxt) and bpt/ept inner markup; strip {123}→123; colored tags by theme; light/dark w/ memory; iframe-safe; selection-safe.
+// @version      1.3.0
+// @description  Copy-ready export of active Phrase target segment: tag widgets → values (mq:rxt) and bpt/ept inner markup; strip {123}→123; ignore [[...]] in preview/copy and when choosing the relevant @; colored tags by theme; light/dark w/ memory; iframe-safe; selection-safe; variable toggles (single-@ and |4) in one vertical list with switch controls above the “Toggle Variables” checkbox.
 // @match        https://app.phrase.com/*
 // @match        https://*.phrase.com/*
 // @match        https://cloud.memsource.com/*
@@ -94,27 +94,46 @@
   /* ===================== Base / utils ===================== */
   const IS_TOP = window.top === window;
   const ORIGIN_ID = `${location.origin}${location.pathname}`;
-  const THEME_KEY = 'ptv-theme'; // 'light' | 'dark'
+  const THEME_KEY = 'ptv-theme';         // 'light' | 'dark'
+  const VARS_KEY  = 'ptv-vars-enabled';  // remember toggle ON/OFF per user
   const $ = (s, r = document) => r.querySelector(s);
 
   let ui, showBtn, lastActive = null;
   let PTV_SELECTING = false;
   const PTV_RENDER_CACHE = { plain: '', html: '' };
-    // Brief visual press feedback for buttons
-function addClickFeedback(btn){
-  if (!btn || btn.dataset._ptvClickFx) return;
-  btn.dataset._ptvClickFx = '1';
-  btn.addEventListener('click', () => {
-    btn.classList.add('ptv-pressed');
-    setTimeout(() => btn.classList.remove('ptv-pressed'), 150);
-  }, true);
-}
 
+  // Variable mode state for current segment
+  let VARS_ENABLED = false;
+  let VARS_TOGGLE;
+  let VARS_FLY; // compact vertical flyout above the Toggle Variables control
+
+  // choices: at = 'before'|'after' (single); or = array of 'a'|'b'
+  let VAR_CHOICES = { at: 'before', or: [] };
+  // selected @ in the original string: nth occurrence (1-based). 0 = none/useful not found
+  let VAR_AT_NTH = 0;
+
+  let PREV_BASE_PLAIN = ''; // to detect segment change and rebuild panel
+
+  // Button click feedback
+  function addClickFeedback(btn){
+    if (!btn || btn.dataset._ptvClickFx) return;
+    btn.dataset._ptvClickFx = '1';
+    btn.addEventListener('click', () => {
+      btn.classList.add('ptv-pressed');
+      setTimeout(() => btn.classList.remove('ptv-pressed'), 150);
+    }, true);
+  }
 
   /* ===================== UI ===================== */
   function ensureUI() {
     if (!IS_TOP) return;
-    if ($('#hs-copybox')) { ui = $('#hs-copybox'); showBtn = $('#hs-showbtn'); return; }
+    if ($('#hs-copybox')) {
+      ui = $('#hs-copybox');
+      showBtn = $('#hs-showbtn');
+      VARS_TOGGLE = $('#hs-vars-toggle');
+      if (!VARS_FLY) createVarsFlyout(); // ensure flyout exists if reusing UI
+      return;
+    }
 
     ui = document.createElement('div');
     ui.id = 'hs-copybox';
@@ -122,6 +141,9 @@ function addClickFeedback(btn){
       <div class="hs-head">
         <strong>Phrase Tag Viewer</strong>
         <div class="hs-menu">
+          <label class="hs-vars-toggle" title="Resolve variables">
+            <input id="hs-vars-toggle" type="checkbox"/><span>Toggle Variables</span>
+          </label>
           <label class="hs-fontctrl" title="Preview font size (px)">
             <span class="hs-fs-label">A</span>
             <input id="hs-fs" type="number" min="10" max="48" step="1" value="14"/>
@@ -154,6 +176,7 @@ function addClickFeedback(btn){
       /* Layout */
       #hs-copybox .hs-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;min-height:20px}
       #hs-copybox .hs-menu{display:flex;gap:10px;align-items:center}
+      #hs-copybox .hs-menu > * { display:flex; align-items:center; gap:6px; }
       #hs-body{display:flex;gap:6px;flex:1;min-height:0}
       #hs-body .hs-textwrap{flex:1;display:flex;min-width:0}
       #hs-pretty{width:100%;height:100%;border-radius:8px;padding:6px;box-sizing:border-box;overflow:auto;white-space:pre-wrap;word-break:break-word;line-height:1.4;font-size:14px;
@@ -161,16 +184,46 @@ function addClickFeedback(btn){
       #hs-out{display:none}
       #hs-copybox .hs-buttons{display:flex;flex-direction:column;gap:6px;align-items:stretch;justify-content:flex-start;min-width:110px}
       #hs-copybox button{border-radius:6px;cursor:pointer;font-size:12px;line-height:1;height:32px;padding:6px 10px;min-width:72px}
+
       /* Font size control */
-      #hs-copybox .hs-fontctrl{display:flex;align-items:center;gap:4px;user-select:none}
+      #hs-copybox .hs-fontctrl{user-select:none}
       #hs-copybox .hs-fs-label{font-weight:700;opacity:.85;display:inline-block;width:14px;text-align:center;font-size:12px}
       #hs-copybox #hs-fs{width:56px;height:24px;border-radius:6px;padding:2px 6px;font-size:12px}
-      /* Theme toggle */
-      #hs-copybox .hs-theme-toggle{display:inline-flex;align-items:center;gap:6px;user-select:none;cursor:pointer;font-size:12px}
-      #hs-copybox .hs-theme-toggle input{margin:0}
+
+      /* Toggle Variables (small, inline) */
+      #hs-copybox .hs-vars-toggle{user-select:none;cursor:pointer;font-size:12px}
+
+      /* Compact Vertical Variables Flyout */
+      #hs-vars-flyout{
+        position:fixed; z-index:2147483647;
+        /* auto width/height based on content; compact vertical layout */
+        border:1px solid; border-radius:10px; padding:10px; font:12px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+        box-shadow:0 10px 24px rgba(0,0,0,.35);
+        max-width:340px; max-height:50vh; overflow:auto;
+      }
+      #hs-vars-flyout.hidden{ display:none!important }
+      #hs-vars-flyout .vars-list{display:flex;flex-direction:column;gap:8px}
+      #hs-vars-flyout .vars-item{display:flex;align-items:center;justify-content:space-between;gap:10px}
+      #hs-vars-flyout .vars-label{flex:1;display:flex;align-items:center;gap:8px;min-width:0}
+      #hs-vars-flyout .vars-option{white-space:nowrap;opacity:.9}
+      #hs-vars-flyout .vars-option.right{margin-left:10px}
+
+      /* Switch control */
+      .ptv-switch{position:relative;width:46px;height:22px;flex:0 0 auto}
+      .ptv-switch input{position:absolute;opacity:0;width:0;height:0}
+      .ptv-switch .track{
+        position:absolute;inset:0;border-radius:999px;border:1px solid currentColor;opacity:.7;
+      }
+      .ptv-switch .thumb{
+        position:absolute;top:1px;left:1px;width:20px;height:20px;border-radius:50%;
+        background:currentColor;transition:transform 160ms ease;
+      }
+      .ptv-switch input:checked + .track + .thumb{ transform:translateX(24px); }
+
       /* Show button */
       #hs-showbtn{position:fixed;z-index:2147483647;border-radius:999px;padding:6px 10px;cursor:pointer;font:12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4)}
       #hs-showbtn.hidden{display:none!important}
+
       /* Theme: light (default) */
       #hs-copybox.ptv-light{background:#f7f8fa;color:#0b0f12;border:1px solid #cfd8e3}
       #hs-copybox.ptv-light #hs-pretty{background:#fff;color:#111827;border:1px solid #cfd8e3}
@@ -178,8 +231,10 @@ function addClickFeedback(btn){
       #hs-copybox.ptv-light button{background:#eef2f7;color:#0b0f12;border:1px solid #cbd5e1}
       #hs-copybox.ptv-light button:hover{background:#e6edf7}
       #hs-copybox.ptv-light #hs-fs{background:#fff;color:#0b0f12;border:1px solid #cbd5e1}
+      #hs-vars-flyout.ptv-light{background:#ffffff;border-color:#cfd8e3;color:#0b0f12}
       #hs-showbtn.ptv-light{background:#eef2f7;color:#0b0f12;border:1px solid #cbd5e1}
       #hs-showbtn.ptv-light:hover{background:#e6edf7}
+
       /* Theme: dark */
       #hs-copybox.ptv-dark{background:#0b0f12;color:#d7e2ea;border:1px solid #1f2a33}
       #hs-copybox.ptv-dark #hs-pretty{background:#0e1317;color:#e8f3ff;border:1px solid #1e2a33}
@@ -187,28 +242,19 @@ function addClickFeedback(btn){
       #hs-copybox.ptv-dark button{background:#10202a;color:#bfe8ff;border:1px solid #1e2f3a}
       #hs-copybox.ptv-dark button:hover{background:#143040}
       #hs-copybox.ptv-dark #hs-fs{background:#0e1317;color:#e8f3ff;border:1px solid #1e2a33}
+      #hs-vars-flyout.ptv-dark{background:#0e1317;border-color:#1e2a33;color:#d7e2ea}
       #hs-copybox.hidden{display:none!important}
       #hs-showbtn.ptv-dark{background:#10202a;color:#bfe8ff;border:1px solid #1e2f3a}
       #hs-showbtn.ptv-dark:hover{background:#143040}
+
       /* Selection: allow text dragging fully */
       #hs-pretty, #hs-pretty *{-webkit-user-select:text!important;-moz-user-select:text!important;user-select:text!important;pointer-events:auto!important}
       #hs-pretty{cursor:text}
-      /* Smooth pressed feedback for buttons */
-#hs-copybox button{
-  transition: transform 120ms ease, filter 120ms ease, background-color 120ms ease;
-}
 
-/* When mouse is held down */
-#hs-copybox button:active{
-  transform: translateY(1px) scale(0.99);
-  filter: brightness(0.96);
-}
-
-/* Brief pressed flash triggered by JS (for clicks that complete instantly) */
-#hs-copybox button.ptv-pressed{
-  transform: translateY(1px) scale(0.98);
-  filter: brightness(0.92);
-}
+      /* Button press feedback */
+      #hs-copybox button{transition:transform 120ms ease, filter 120ms ease, background-color 120ms ease}
+      #hs-copybox button:active{transform:translateY(1px) scale(0.99);filter:brightness(0.96)}
+      #hs-copybox button.ptv-pressed{transform:translateY(1px) scale(0.98);filter:brightness(0.92)}
     `;
     document.documentElement.append(style, ui);
 
@@ -229,17 +275,38 @@ function addClickFeedback(btn){
     const themeInput = $('#hs-theme');
     const applyTheme = t => {
       ui.classList.toggle('ptv-light', t==='light');
-      ui.classList.toggle('ptv-dark', t==='dark');
+      ui.classList.toggle('ptv-dark',  t==='dark');
       showBtn.classList.toggle('ptv-light', t==='light');
-      showBtn.classList.toggle('ptv-dark', t==='dark');
+      showBtn.classList.toggle('ptv-dark',  t==='dark');
+      if (VARS_FLY) {
+        VARS_FLY.classList.toggle('ptv-light', t==='light');
+        VARS_FLY.classList.toggle('ptv-dark',  t==='dark');
+      }
       localStorage.setItem(THEME_KEY, t);
       themeInput.checked = (t === 'dark');
     };
     applyTheme(localStorage.getItem(THEME_KEY) || 'light');
     themeInput.addEventListener('change', () => applyTheme(themeInput.checked ? 'dark' : 'light'));
 
+    // Toggle Variables
+    VARS_TOGGLE = $('#hs-vars-toggle');
+    VARS_ENABLED = false; // default OFF
+VARS_TOGGLE.checked = VARS_ENABLED;
+// (optional) keep storage in sync:
+localStorage.setItem(VARS_KEY, '0');
+    VARS_TOGGLE.checked = VARS_ENABLED;
+    VARS_TOGGLE.addEventListener('change', () => {
+      VARS_ENABLED = VARS_TOGGLE.checked;
+      localStorage.setItem(VARS_KEY, VARS_ENABLED ? '1' : '0');
+      if (VARS_ENABLED) { if (!VARS_FLY) createVarsFlyout(); positionVarsFlyout(); VARS_FLY.classList.remove('hidden'); }
+      else { VARS_FLY?.classList.add('hidden'); }
+      // Reset choices on toggle (fresh from current segment)
+      PREV_BASE_PLAIN = ''; // force rebuild on next render
+      render();
+    });
+
     // Copy
-    $('#hs-copybtn').addEventListener('click', async () => {
+    const copyHandler = async () => {
       const text = $('#hs-out')?.value || '';
       try {
         if (typeof GM_setClipboard === 'function') return GM_setClipboard(text, { type:'text', mimetype:'text/plain' });
@@ -247,8 +314,9 @@ function addClickFeedback(btn){
       } catch {
         const ta = $('#hs-out'); if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
       }
-        addClickFeedback($('#hs-copybtn'));
-    });
+    };
+    $('#hs-copybtn').addEventListener('click', copyHandler);
+    addClickFeedback($('#hs-copybtn'));
 
     // Font size controller
     const fsInput = $('#hs-fs'), applyFs = () => {
@@ -268,10 +336,50 @@ function addClickFeedback(btn){
     };
 
     // Hide/Show
-    $('#hs-hide').addEventListener('click', () => { positionShowButtonNearHide(); ui.classList.add('hidden'); showBtn.classList.remove('hidden'); });
-    showBtn.addEventListener('click', () => { ui.classList.remove('hidden'); showBtn.classList.add('hidden'); });
-    window.addEventListener('resize', () => { if (ui.classList.contains('hidden')) positionShowButtonNearHide(); });
-    window.addEventListener('keydown', e => { if (e.altKey && (e.key==='p'||e.key==='P')) ui.classList.contains('hidden') ? showBtn.click() : $('#hs-hide').click(); }, true);
+    const doHide = () => { positionShowButtonNearHide(); ui.classList.add('hidden'); showBtn.classList.remove('hidden'); VARS_FLY?.classList.add('hidden'); };
+    const doShow = () => { ui.classList.remove('hidden'); showBtn.classList.add('hidden'); if (VARS_ENABLED) { positionVarsFlyout(); VARS_FLY?.classList.remove('hidden'); } };
+    $('#hs-hide').addEventListener('click', doHide);
+    addClickFeedback($('#hs-hide'));
+    showBtn.addEventListener('click', doShow);
+
+    // Reposition flyout / show button on resize
+    window.addEventListener('resize', () => {
+      if (ui.classList.contains('hidden')) { positionShowButtonNearHide(); }
+      if (VARS_ENABLED && !ui.classList.contains('hidden')) positionVarsFlyout();
+    });
+
+    // Keyboard toggle (Alt+P)
+    window.addEventListener('keydown', e => {
+      if (e.altKey && (e.key==='p'||e.key==='P')) ui.classList.contains('hidden') ? showBtn.click() : $('#hs-hide').click();
+    }, true);
+
+    // Create the flyout after UI exists
+    createVarsFlyout();
+    // Initial visibility
+    if (VARS_ENABLED) { positionVarsFlyout(); VARS_FLY.classList.remove('hidden'); }
+    else { VARS_FLY.classList.add('hidden'); }
+  }
+
+  function createVarsFlyout(){
+    if (VARS_FLY) return;
+    VARS_FLY = document.createElement('div');
+    VARS_FLY.id = 'hs-vars-flyout';
+    VARS_FLY.className = 'hidden'; // visible only when enabled
+    // match theme
+    const t = localStorage.getItem(THEME_KEY) || 'light';
+    VARS_FLY.classList.add(t === 'dark' ? 'ptv-dark' : 'ptv-light');
+    VARS_FLY.innerHTML = `<div class="vars-list" id="hs-vars-list"></div>`;
+    document.documentElement.appendChild(VARS_FLY);
+  }
+
+  function positionVarsFlyout(){
+    if (!ui || !VARS_FLY) return;
+    const toggleLabel = $('.hs-vars-toggle'); // label that contains the checkbox + text
+    const r = toggleLabel?.getBoundingClientRect();
+    if (!r) return;
+    // Align left to the label's left; place directly above it with a small gap.
+    VARS_FLY.style.left = Math.round(r.left) + 'px';
+    VARS_FLY.style.bottom = Math.max(8, Math.round(window.innerHeight - r.top + 6)) + 'px';
   }
 
   const setPreview = (plain, html) => {
@@ -280,13 +388,35 @@ function addClickFeedback(btn){
     if (PTV_RENDER_CACHE.plain === (plain||'') && PTV_RENDER_CACHE.html === (html||'')) return; // no-op
     PTV_RENDER_CACHE.plain = plain || ''; PTV_RENDER_CACHE.html = html || '';
     pretty.innerHTML = PTV_RENDER_CACHE.html; ta.value = PTV_RENDER_CACHE.plain;
-      addClickFeedback($('#hs-hide'));
   };
 
   /* ===================== Decoding / conversion ===================== */
   const decodeHtml = s => { const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
   const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const stripNumericBraces = s => String(s ?? '').replace(/\{(\d+)\}/g, '$1'); // "{123}" → "123"
+
+  // Remove everything between [[...]] non-greedily (works on plain or html; spans are fine)
+  const stripDoubleBrackets = s => String(s ?? '').replace(/\[\[[\s\S]*?\]\]/g, '');
+
+  // For logic that must *ignore* bracketed text (without modifying original), compute ranges.
+  function findBracketRanges(s) {
+    const ranges = [];
+    const re = /\[\[|\]\]/g;
+    let m, stack = [];
+    while ((m = re.exec(s))) {
+      if (m[0] === '[[') stack.push(m.index);
+      else if (m[0] === ']]' && stack.length) {
+        const start = stack.pop();
+        ranges.push([start, m.index + 2]); // half-open [start,end)
+      }
+    }
+    return ranges.sort((a,b)=>a[0]-b[0]);
+  }
+  function indexInRanges(i, ranges){
+    for (const [a,b] of ranges) { if (i>=a && i<b) return true; if (i<b) continue; }
+    return false;
+  }
+  const removeBracketed = s => stripDoubleBrackets(s); // alias for clarity
 
   function extractPhraseTagValue(el) {
     const meta = el.querySelector?.('.tag_metadata_content')?.textContent || el.getAttribute?.('tmp-title') || el.getAttribute?.('title') || '';
@@ -295,7 +425,7 @@ function addClickFeedback(btn){
     // mq:rxt
     let m = un.match(/displaytext="([^"]*)"/i) || un.match(/val="([^"]*)"/i);
     if (m) return { text: decodeHtml(m[1]||''), fromTag:true };
-    // bpt/ept
+    // bpt/ept or generic inner
     let inner = un.match(/<(?:bpt|ept)\b[^>]*>([\s\S]*?)<\/(?:bpt|ept)>/i) || un.match(/<\w+\b[^>]*>([\s\S]*?)<\/\w+>/i);
     if (inner) return { text: decodeHtml(inner[1]||''), fromTag:true };
     // placeholder fallback
@@ -316,10 +446,229 @@ function addClickFeedback(btn){
         const { text } = extractPhraseTagValue(el);
         const m = /^\{(\d+)\}$/.exec(text);
         if (m) { const num = m[1]; plain += num; html += `<span class="hs-taglit">${escapeHtml(num)}</span>`; }
-        else { plain += text; html += `<span class="hs-taglit">${escapeHtml(text)}</span>`; }
+        else   { plain += text; html += `<span class="hs-taglit">${escapeHtml(text)}</span>`; }
       }
     });
     return { plain: stripNumericBraces(plain), html };
+  }
+
+  /* ===================== Variable scanning / applying ===================== */
+  // Utility: scan all '@' positions and also return 1-based index for each (@#)
+  function scanAtPositions(s) {
+    const pos = [];
+    for (let i = 0, nth = 0; i < s.length; i++) if (s[i] === '@') { nth++; pos.push({ idx:i, nth }); }
+    return pos;
+  }
+
+  // Collect all |4(a,b) occurrences (in textual order)
+  function scanOrPairs(s) {
+    const re = /\|4\(\s*([^,]*?)\s*,\s*([^)]+?)\s*\)/g;
+    const out = [];
+    let m; while ((m = re.exec(s))) {
+      out.push({ a: m[1].trim(), b: m[2].trim() });
+    }
+    return out;
+  }
+
+  // --------- Normalization + Dice overlap scoring ---------
+  const DICE_MIN = 0.55;      // tweakable
+  const RATIO_MIN = 0.65;     // min(min(nL,nR)/max(nL,nR))
+  const MIN_TOKENS = 4;       // avoid tiny stubs
+
+  function neutralizeOr(s) { return s.replace(/\|4\(\s*[^,]+?\s*,\s*[^)]+?\s*\)/g, ' ALT '); }
+  function stripHtmlTags(s) { return s.replace(/<[^>]+>/g, ' '); }
+  function tokenize(s) {
+    const m = s.toLowerCase().match(/[0-9A-Za-zÀ-ÖØ-öø-ÿ]+/g);
+    return m ? m : [];
+  }
+  function bag(tokens) {
+    const map = new Map();
+    for (const t of tokens) map.set(t, (map.get(t)||0) + 1);
+    return map;
+  }
+  function bagSize(map) { let n = 0; for (const v of map.values()) n += v; return n; }
+  function bagIntersectionSize(a, b) {
+    let n = 0; for (const [tok, ca] of a.entries()) { const cb = b.get(tok); if (cb) n += Math.min(ca, cb); } return n;
+  }
+
+  // Choose ONE useful '@' split by Dice + size sanity, ignoring any @ inside [[...]].
+  // Return {nth} where nth is the 1-based ordinal in the ORIGINAL string (including bracketed areas).
+  function pickBestAtNth(original) {
+    const ranges = findBracketRanges(original);
+    const atPos = scanAtPositions(original).filter(p => !indexInRanges(p.idx, ranges));
+    if (!atPos.length) return { nth: 0 };
+
+    // Prepare a bracket-stripped copy for size/similarity decisions
+    const s = removeBracketed(original);
+
+    // Map from original index to index in stripped string to slice cleanly
+    // (We can approximate by rebuilding with a walk.)
+    const mapOrigToStripped = (() => {
+      const arr = new Array(original.length).fill(-1);
+      let j = 0, k = 0;
+      while (k < original.length) {
+        // If we're inside a bracket range, skip until end of that range
+        let skipped = false;
+        for (const [a,b] of ranges) {
+          if (k >= a && k < b) { k = b; skipped = true; break; }
+        }
+        if (skipped) continue;
+        arr[k] = j; j++; k++;
+      }
+      return arr;
+    })();
+
+    let bestNth = 0;
+    let bestDice = -1;
+
+    for (const { idx, nth } of atPos) {
+      const si = mapOrigToStripped[idx];
+      if (si < 0) continue; // shouldn't happen; safety
+
+      const left  = s.slice(0, si);
+      const right = s.slice(si + 1);
+
+      // normalize: neutralize |4(...), strip tags, collapse spaces
+      let Ls = stripHtmlTags(neutralizeOr(left)).replace(/\s+/g, ' ').trim();
+      let Rs = stripHtmlTags(neutralizeOr(right)).replace(/\s+/g, ' ').trim();
+
+      const L = tokenize(Ls), R = tokenize(Rs);
+      const nL = L.length, nR = R.length;
+      if (nL < MIN_TOKENS || nR < MIN_TOKENS) continue;
+
+      const ratio = Math.min(nL, nR) / Math.max(nL, nR);
+      if (ratio < RATIO_MIN) continue;
+
+      const BL = bag(L), BR = bag(R);
+      const inter = bagIntersectionSize(BL, BR);
+      const dice = (2 * inter) / (bagSize(BL) + bagSize(BR));
+
+      if (dice >= DICE_MIN && dice > bestDice) {
+        bestDice = dice; bestNth = nth; // NOTE: nth refers to original-string order
+      }
+    }
+
+    return { nth: bestNth };
+  }
+
+  // Resolve the Nth '@' (1-based, in ORIGINAL string). If nth=0 or not found, return original.
+  // choice: 'before' -> keep left side; 'after' -> keep right side
+  function resolveAtNth(text, choice, nth) {
+    if (!nth || (choice !== 'before' && choice !== 'after')) return text;
+    let seen = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '@') {
+        seen++;
+        if (seen === nth) {
+          return (choice === 'after') ? text.slice(i+1) : text.slice(0, i);
+        }
+      }
+    }
+    return text;
+  }
+
+  // Resolve |4(a,b) with provided choices (array of 'a'|'b')
+  function resolveOr(text, choices) {
+    const re = /\|4\(\s*([^,]*?)\s*,\s*([^)]+?)\s*\)/g;
+    let k = 0;
+    return text.replace(re, (_, a, b) => ((choices && choices[k++] === 'b') ? b : a));
+  }
+
+  // Build/refresh variable flyout for a given base text (vertical list, unified, switch controls)
+  function buildVarsFlyout(basePlain) {
+    if (!VARS_FLY) return;
+    const list = $('#hs-vars-list');
+    if (!list) return;
+    list.textContent = '';
+
+    // Choose the single useful '@' (or none), ignoring [[...]]
+    const picked = pickBestAtNth(basePlain);
+    VAR_AT_NTH = picked.nth || 0;
+
+    // Scan all |4 pairs
+    const orPairs = scanOrPairs(basePlain);
+
+    // Reset choices on segment change
+    VAR_CHOICES = {
+      at: 'before',
+      or: new Array(orPairs.length).fill('a')
+    };
+
+    // Helper to make a switch row
+    function makeSwitchRow(leftLabel, rightLabel, checked, onChange) {
+      const row = document.createElement('div');
+      row.className = 'vars-item';
+
+      const left = document.createElement('span');
+      left.className = 'vars-option left';
+      left.textContent = leftLabel;
+
+      const right = document.createElement('span');
+      right.className = 'vars-option right';
+      right.textContent = rightLabel;
+
+      const sw = document.createElement('label');
+      sw.className = 'ptv-switch';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = !!checked;
+      const track = document.createElement('span'); track.className = 'track';
+      const thumb = document.createElement('span'); thumb.className = 'thumb';
+      input.addEventListener('change', () => onChange(input.checked));
+
+      sw.appendChild(input); sw.appendChild(track); sw.appendChild(thumb);
+
+      const labelWrap = document.createElement('div');
+      labelWrap.className = 'vars-label';
+      // layout: LeftLabel  [switch]  RightLabel
+      labelWrap.appendChild(left);
+      labelWrap.appendChild(sw);
+      labelWrap.appendChild(right);
+
+      row.appendChild(labelWrap);
+      return row;
+    }
+
+    // Single @ toggle (only if we found a useful split)
+    if (VAR_AT_NTH > 0) {
+      // Checked (ball on right) → "After @"
+      const row = makeSwitchRow('Before @', 'After @', false, (checked) => {
+        VAR_CHOICES.at = checked ? 'after' : 'before';
+        render();
+      });
+      list.appendChild(row);
+    }
+
+    // |4 toggles (each pair in its own vertical row)
+    orPairs.forEach((p, i) => {
+      // Checked (ball on right) → choose 'b'
+      const row = makeSwitchRow(p.a || 'a', p.b || 'b', false, (checked) => {
+        VAR_CHOICES.or[i] = checked ? 'b' : 'a';
+        render();
+      });
+      list.appendChild(row);
+    });
+
+    if (list.children.length === 0) {
+      const none = document.createElement('div');
+      none.className = 'vars-item';
+      none.textContent = 'No variables found in this segment.';
+      list.appendChild(none);
+    }
+  }
+
+  // Apply variable choices to both plain and html strings, then strip [[...]] for final output
+  function applyVariablesToOutputs(basePlain, baseHtml) {
+    // Resolve the selected @ (same Nth in both plain/html based on ORIGINAL strings)
+    let p = resolveAtNth(basePlain, VAR_CHOICES.at, VAR_AT_NTH);
+    let h = resolveAtNth(baseHtml,  VAR_CHOICES.at, VAR_AT_NTH);
+    // Then resolve |4(a,b)
+    p = resolveOr(p, VAR_CHOICES.or);
+    h = resolveOr(h, VAR_CHOICES.or);
+    // Finally, remove double-bracketed content from both outputs for printing
+    p = stripDoubleBrackets(p);
+    h = stripDoubleBrackets(h);
+    return { plain: p, html: h };
   }
 
   /* ===================== Active row ===================== */
@@ -364,7 +713,7 @@ function addClickFeedback(btn){
   /* ===================== Bridge ===================== */
   const MSG_MARK = '__hs_bridge__';
   const postToChildren = msg => { if (!IS_TOP) return; for (let i=0;i<window.frames.length;i++) { try { window.frames[i].postMessage({[MSG_MARK]:true, ...msg}, '*'); } catch {} } };
-  const postToParent = msg => { if (IS_TOP) return; try { window.parent.postMessage({[MSG_MARK]:true, ...msg}, '*'); } catch {} };
+  const postToParent   = msg => { if (IS_TOP) return; try { window.parent.postMessage({[MSG_MARK]:true, ...msg }, '*'); } catch {} };
 
   window.addEventListener('message', e => {
     const d = e?.data; if (!d || !d[MSG_MARK]) return;
@@ -374,7 +723,7 @@ function addClickFeedback(btn){
         ensureUI(); render();
       }
     } else {
-      if (d.type === 'PING') postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'editor-frame' });
+      if (d.type === 'PING')            postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'editor-frame' });
       if (d.type === 'REQUEST_ACTIVE') {
         const r = readActiveFromDoc(document);
         postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{ plain:r.plain||'', html:r.html||'' } });
@@ -386,12 +735,39 @@ function addClickFeedback(btn){
   function render() {
     if (!IS_TOP || PTV_SELECTING) return;
     ensureUI();
+
     // same-origin first
     const { docs } = getAllDocs(document);
     let found = null;
     for (const d of docs) { const r = readActiveFromDoc(d); if (r.row) { found = r; break; } }
     const active = found || lastActive || null;
-    setPreview(active?.plain || '', active?.html || '');
+
+    const basePlain = active?.plain || '';
+    const baseHtml  = active?.html  || '';
+
+    if (!VARS_ENABLED) {
+      // Even without variables, we must hide [[...]] in preview/copy
+      const p = stripDoubleBrackets(basePlain);
+      const h = stripDoubleBrackets(baseHtml);
+      setPreview(p, h);
+      PREV_BASE_PLAIN = basePlain; // cache even when off
+      VARS_FLY?.classList.add('hidden'); // ensure flyout hidden when disabled
+      return;
+    }
+
+    // VARS mode: ensure flyout visible & positioned
+    positionVarsFlyout();
+    VARS_FLY?.classList.remove('hidden');
+
+    // Rebuild flyout if segment changed
+    if (PREV_BASE_PLAIN !== basePlain) {
+      buildVarsFlyout(basePlain);
+      PREV_BASE_PLAIN = basePlain;
+    }
+
+    // Apply choices → outputs (then strip [[...]])
+    const resolved = applyVariablesToOutputs(basePlain, baseHtml);
+    setPreview(resolved.plain, resolved.html);
   }
 
   function wireInstantSignals() {
@@ -399,16 +775,22 @@ function addClickFeedback(btn){
     ['input','keyup','selectionchange','pointerup','focusin'].forEach(ev => document.addEventListener(ev, instant, true));
   }
 
-  function tickTop() { postToChildren({type:'PING'}); postToChildren({type:'REQUEST_ACTIVE'}); render(); }
+  function tickTop()   { postToChildren({type:'PING'}); postToChildren({type:'REQUEST_ACTIVE'}); render(); }
   function tickFrame() {
     const r = readActiveFromDoc(document);
     if (r && (r.row || r.plain || r.html)) postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{ plain:r.plain||'', html:r.html||'' } });
-    else postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'probe' });
+    else                                   postToParent({ type:'PONG',   frameId:ORIGIN_ID, info:'probe' });
   }
 
   /* ===================== Boot ===================== */
   function boot() {
     if (IS_TOP) ensureUI();
+    // Load last-used variable toggle preference
+    VARS_ENABLED = false; // default OFF on every load
+if (IS_TOP && $('#hs-vars-toggle')) $('#hs-vars-toggle').checked = VARS_ENABLED;
+// (optional)
+localStorage.setItem(VARS_KEY, '0');
+    if (IS_TOP && $('#hs-vars-toggle')) $('#hs-vars-toggle').checked = VARS_ENABLED;
     wireInstantSignals();
     const tick = IS_TOP ? tickTop : tickFrame;
     setTimeout(tick, 300);
