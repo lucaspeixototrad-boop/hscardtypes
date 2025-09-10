@@ -1,0 +1,583 @@
+// ==UserScript==
+// @name         Phrase Tag Viewer (Source + Target)
+// @namespace    hs.phrase.copyexport
+// @version      1.6.0
+// @description  Shows source (left) and target (right) for the active Phrase segment. Tag widgets → values (mq:rxt) and bpt/ept inner markup; strip {123}→123; ignore [[...]] in both previews and when choosing the relevant @; colored tags by theme; light/dark w/ memory; iframe-safe; selection-safe; variable toggles (single-@ and |4) in one vertical list above the “Toggle Variables” checkbox.
+// @match        https://app.phrase.com/*
+// @match        https://*.phrase.com/*
+// @match        https://cloud.memsource.com/*
+// @match        https://*.memsource.com/*
+// @exclude      https://cloud.memsource.com/web/project*
+// @exclude      https://cloud.memsource.com/web/job2/list*
+// @exclude      https://cloud.memsource.com/tms/transMemory/list*
+// @exclude      https://cloud.memsource.com/tms/setup/*
+// @exclude      https://cloud.memsource.com/web/setup/*
+// @run-at       document-idle
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(() => {
+  /* ===================== Base / utils ===================== */
+  const IS_TOP   = window.top === window;
+  const ORIGIN_ID = `${location.origin}${location.pathname}`;
+  const THEME_KEY = 'ptv-theme';         // 'light' | 'dark'
+  const VARS_KEY  = 'ptv-vars-enabled';  // remember toggle ON/OFF per user
+  const $ = (s, r = document) => r.querySelector(s);
+
+  let ui, showBtn, lastActive = null;
+  let PTV_SELECTING = false;
+  const PTV_RENDER_CACHE = { srcPlain:'', srcHtml:'', tgtPlain:'', tgtHtml:'' };
+
+  // Variables panel state (applies to TARGET only; source is display-only)
+  let VARS_ENABLED = false;
+  let VARS_TOGGLE, VARS_FLY;
+  let VAR_CHOICES = { at: 'before', or: [] }; // 'at' = before|after; 'or' = ['a'|'b', ...]
+  let VAR_AT_NTH  = 0;                         // selected @ ordinal (1-based) in ORIGINAL target string
+  let PREV_BASE_PLAIN = '';
+
+  const addClickFeedback = btn => {
+    if (!btn || btn.dataset._ptvClickFx) return;
+    btn.dataset._ptvClickFx = '1';
+    btn.addEventListener('click', () => {
+      btn.classList.add('ptv-pressed'); setTimeout(() => btn.classList.remove('ptv-pressed'), 150);
+    }, true);
+  };
+
+  /* ===================== UI ===================== */
+  function ensureUI() {
+    if (!IS_TOP) return;
+    if ($('#hs-copybox')) {
+      ui = $('#hs-copybox'); showBtn = $('#hs-showbtn'); VARS_TOGGLE = $('#hs-vars-toggle');
+      if (!VARS_FLY) createVarsFlyout();
+      return;
+    }
+
+    ui = document.createElement('div');
+    ui.id = 'hs-copybox';
+    ui.innerHTML = `
+      <div class="hs-head">
+        <strong>Phrase Tag Viewer</strong>
+        <div class="hs-menu">
+          <label class="hs-vars-toggle" title="Resolve variables">
+            <input id="hs-vars-toggle" type="checkbox"/><span>Toggle Variables</span>
+          </label>
+          <label class="hs-fontctrl" title="Preview font size (px)">
+            <span class="hs-fs-label">A</span>
+            <input id="hs-fs" type="number" min="10" max="48" step="1" value="14"/>
+          </label>
+          <label class="hs-theme-toggle" title="Toggle dark mode">
+            <input id="hs-theme" type="checkbox"/><span>Dark</span>
+          </label>
+        </div>
+      </div>
+      <div id="hs-body">
+        <div class="hs-textwrap">
+          <div id="hs-pretty-src" class="hs-pretty" aria-label="Source preview" tabindex="0"></div>
+          <div id="hs-pretty-tgt" class="hs-pretty" aria-label="Target preview" tabindex="0"></div>
+          <textarea id="hs-out" aria-hidden="true"></textarea>
+        </div>
+        <div class="hs-buttons">
+          <button id="hs-copybtn" title="Copy target to clipboard">Copy</button>
+          <button id="hs-hide"  title="Hide panel">Hide</button>
+        </div>
+      </div>`;
+
+    Object.assign(ui.style, {
+      position:'fixed', left:'12px', bottom:'40px', width:'1420px', height:'210px', maxWidth:'98vw',
+      zIndex:2147483647, borderRadius:'10px', boxShadow:'0 8px 24px rgba(0,0,0,.4)',
+      font:'12px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif', padding:'10px',
+      display:'flex', flexDirection:'column'
+    });
+
+    const style = document.createElement('style');
+    style.textContent = `
+      /* Theme variables (apply to panel, flyout, show button) */
+      #hs-copybox,
+      #hs-vars-flyout.ptv-light,
+      #hs-showbtn.ptv-light {
+        --bg:#f7f8fa;--fg:#0b0f12;--bd:#cfd8e3;--panel:#fff;--panelFg:#111827;--tag:#1d4ed8;
+        --btnBg:#eef2f7;--btnFg:#0b0f12;--btnBd:#cbd5e1;--btnHover:#e6edf7;
+      }
+      #hs-copybox.ptv-dark,
+      #hs-vars-flyout.ptv-dark,
+      #hs-showbtn.ptv-dark {
+        --bg:#0b0f12;--fg:#d7e2ea;--bd:#1f2a33;--panel:#0e1317;--panelFg:#e8f3ff;--tag:#f6c560;
+        --btnBg:#10202a;--btnFg:#bfe8ff;--btnBd:#1e2f3a;--btnHover:#143040;
+      }
+
+      /* Panel container + visibility */
+      #hs-copybox{background:var(--bg);color:var(--fg);border:1px solid var(--bd)}
+      #hs-copybox.hidden{display:none!important}
+
+      /* Layout */
+      #hs-copybox .hs-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;min-height:20px}
+      #hs-copybox .hs-menu{display:flex;gap:10px;align-items:center}
+      #hs-copybox .hs-menu > * { display:flex; align-items:center; gap:6px; }
+      #hs-body{display:flex;gap:8px;flex:1;min-height:0}
+      #hs-body .hs-textwrap{flex:1;display:flex;gap:8px;min-width:0}
+      .hs-pretty{flex:1;min-width:0;height:100%;border-radius:8px;padding:6px;box-sizing:border-box;overflow:auto;white-space:pre-wrap;word-break:break-word;line-height:1.4;font-size:14px;background:var(--panel);color:var(--panelFg);border:1px solid var(--bd);
+        font-family:"Inter","IBM Plex Sans","Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif}
+      #hs-out{display:none}
+      #hs-copybox .hs-buttons{display:flex;flex-direction:column;gap:6px;align-items:stretch;justify-content:flex-start;min-width:100px}
+      #hs-copybox button{border-radius:6px;cursor:pointer;font-size:12px;line-height:1;height:30px;padding:6px 8px;min-width:92px;background:var(--btnBg);color:var(--btnFg);border:1px solid var(--btnBd);transition:transform 120ms ease, filter 120ms ease, background-color 120ms ease}
+      #hs-copybox button:hover{background:var(--btnHover)}
+      #hs-copybox button:active{transform:translateY(1px) scale(0.99);filter:brightness(0.96)}
+      #hs-copybox button.ptv-pressed{transform:translateY(1px) scale(0.98);filter:brightness(0.92)}
+      .hs-taglit{color:var(--tag);font-weight:600}
+
+      /* Font size control */
+      #hs-copybox .hs-fontctrl{user-select:none}
+      #hs-copybox .hs-fs-label{font-weight:700;opacity:.85;display:inline-block;width:14px;text-align:center;font-size:12px}
+      #hs-copybox #hs-fs{width:56px;height:24px;border-radius:6px;padding:2px 6px;font-size:12px;background:var(--panel);color:var(--fg);border:1px solid var(--btnBd)}
+
+      /* Variables Flyout (compact vertical, themed via vars) */
+      #hs-vars-flyout{position:fixed;z-index:2147483647;border:1px solid var(--bd);border-radius:10px;padding:10px;font:12px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-shadow:0 10px 24px rgba(0,0,0,.35);max-width:340px;max-height:50vh;overflow:auto;background:var(--panel);color:var(--fg)}
+      #hs-vars-flyout.hidden{display:none!important}
+      #hs-vars-flyout .vars-list{display:flex;flex-direction:column;gap:8px}
+      #hs-vars-flyout .vars-item{display:flex;align-items:center;justify-content:space-between;gap:10px}
+      #hs-vars-flyout .vars-label{flex:1;display:flex;align-items:center;gap:8px;min-width:0}
+      #hs-vars-flyout .vars-option{white-space:nowrap;opacity:.9}
+      #hs-vars-flyout .vars-option.right{margin-left:10px}
+      .ptv-switch{position:relative;width:46px;height:22px;flex:0 0 auto}
+      .ptv-switch input{position:absolute;opacity:0;width:0;height:0}
+      .ptv-switch .track{position:absolute;inset:0;border-radius:999px;border:1px solid currentColor;opacity:.7;}
+      .ptv-switch .thumb{position:absolute;top:1px;left:1px;width:20px;height:20px;border-radius:50%;background:currentColor;transition:transform 160ms ease;}
+      .ptv-switch input:checked + .track + .thumb{ transform:translateX(24px); }
+
+      /* Show button (themed via vars) */
+      #hs-showbtn{position:fixed;z-index:2147483647;border-radius:999px;padding:6px 10px;cursor:pointer;font:12px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4);background:var(--btnBg);color:var(--btnFg);border:1px solid var(--btnBd)}
+      #hs-showbtn.hidden{display:none!important}
+
+      /* Selection: allow text dragging fully */
+      .hs-pretty, .hs-pretty *{-webkit-user-select:text!important;-moz-user-select:text!important;user-select:text!important;pointer-events:auto!important}
+      .hs-pretty{cursor:text}
+    `;
+    document.documentElement.append(style, ui);
+
+    // Selection guard (avoid rerenders mid-drag)
+    document.querySelectorAll('.hs-pretty').forEach(el => {
+      if (!el.dataset._ptvBound) {
+        el.dataset._ptvBound = '1';
+        el.addEventListener('mousedown', () => { PTV_SELECTING = true; }, true);
+        window.addEventListener('mouseup', () => { PTV_SELECTING = false; }, true);
+      }
+    });
+
+    // Show button
+    showBtn = document.createElement('button');
+    showBtn.id = 'hs-showbtn'; showBtn.textContent = 'Show'; showBtn.className = 'hidden';
+    document.documentElement.appendChild(showBtn);
+
+    // Theme
+    const themeInput = $('#hs-theme');
+    const applyTheme = t => {
+      ui.classList.toggle('ptv-dark',  t==='dark');
+      ui.classList.toggle('ptv-light', t!=='dark');
+      showBtn.classList.toggle('ptv-dark',  t==='dark');
+      showBtn.classList.toggle('ptv-light', t!=='dark');
+      VARS_FLY?.classList.toggle('ptv-dark',  t==='dark');
+      VARS_FLY?.classList.toggle('ptv-light', t!=='dark');
+      localStorage.setItem(THEME_KEY, t);
+      themeInput.checked = (t === 'dark');
+    };
+    applyTheme(localStorage.getItem(THEME_KEY) || 'light');
+    themeInput.addEventListener('change', () => applyTheme(themeInput.checked ? 'dark' : 'light'));
+
+    // Variables toggle
+    VARS_TOGGLE = $('#hs-vars-toggle');
+    VARS_ENABLED = (localStorage.getItem(VARS_KEY) === '1');
+    VARS_TOGGLE.checked = VARS_ENABLED;
+    VARS_TOGGLE.addEventListener('change', () => {
+      VARS_ENABLED = VARS_TOGGLE.checked;
+      localStorage.setItem(VARS_KEY, VARS_ENABLED ? '1' : '0');
+      if (VARS_ENABLED) { if (!VARS_FLY) createVarsFlyout(); positionVarsFlyout(); VARS_FLY.classList.remove('hidden'); }
+      else VARS_FLY?.classList.add('hidden');
+      PREV_BASE_PLAIN = ''; // force rebuild next render
+      render();
+    });
+
+    // Copy (target)
+    const copyHandler = async () => {
+      const text = $('#hs-out')?.value || '';
+      try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text, { type:'text', mimetype:'text/plain' }); return; } } catch {}
+      try { await navigator.clipboard.writeText(text); } catch {
+        const ta = $('#hs-out'); if (ta) { ta.focus(); ta.select(); document.execCommand('copy'); }
+      }
+    };
+    $('#hs-copybtn').addEventListener('click', copyHandler);
+    addClickFeedback($('#hs-copybtn'));
+
+    // Hide/Show
+    const positionShowButtonNearHide = () => {
+      const r = ui.getBoundingClientRect();
+      showBtn.style.left = Math.round(r.left + r.width - 88) + 'px';
+      showBtn.style.bottom = Math.max(8, Math.round(window.innerHeight - r.bottom)) + 'px';
+    };
+    const doHide = () => { positionShowButtonNearHide(); ui.classList.add('hidden'); showBtn.classList.remove('hidden'); VARS_FLY?.classList.add('hidden'); };
+    const doShow = () => { ui.classList.remove('hidden'); showBtn.classList.add('hidden'); if (VARS_ENABLED) { positionVarsFlyout(); VARS_FLY?.classList.remove('hidden'); } };
+    $('#hs-hide').addEventListener('click', doHide);
+    addClickFeedback($('#hs-hide'));
+    showBtn.addEventListener('click', doShow);
+
+    // Font size
+    const fsInput = $('#hs-fs'), applyFs = () => {
+      const px = Math.max(10, Math.min(48, Number(fsInput.value || 14) || 14));
+      document.querySelectorAll('.hs-pretty').forEach(el => el.style.fontSize = px + 'px');
+    };
+    fsInput.addEventListener('input', applyFs);
+    fsInput.addEventListener('change', applyFs);
+    applyFs();
+
+    // Resize hooks
+    window.addEventListener('resize', () => {
+      if (ui.classList.contains('hidden')) { const r = ui.getBoundingClientRect(); showBtn.style.left = Math.round(r.left + r.width - 88) + 'px'; }
+      if (VARS_ENABLED && !ui.classList.contains('hidden')) positionVarsFlyout();
+    });
+
+    // Keyboard toggle (Alt+P)
+    window.addEventListener('keydown', e => {
+      if (e.altKey && (e.key==='p'||e.key==='P')) ui.classList.contains('hidden') ? showBtn.click() : $('#hs-hide').click();
+    }, true);
+
+    // Flyout
+    createVarsFlyout();
+    VARS_FLY.classList.toggle('hidden', !VARS_ENABLED);
+    if (VARS_ENABLED) positionVarsFlyout();
+  }
+
+  function createVarsFlyout(){
+    if (VARS_FLY) return;
+    VARS_FLY = document.createElement('div');
+    VARS_FLY.id = 'hs-vars-flyout';
+    VARS_FLY.className = 'hidden ' + ((localStorage.getItem(THEME_KEY) || 'light') === 'dark' ? 'ptv-dark' : 'ptv-light');
+    VARS_FLY.innerHTML = `<div class="vars-list" id="hs-vars-list"></div>`;
+    document.documentElement.appendChild(VARS_FLY);
+  }
+
+  function positionVarsFlyout(){
+    const toggleLabel = $('.hs-vars-toggle'); if (!toggleLabel || !VARS_FLY) return;
+    const r = toggleLabel.getBoundingClientRect();
+    VARS_FLY.style.left = Math.round(r.left) + 'px';
+    VARS_FLY.style.bottom = Math.max(8, Math.round(window.innerHeight - r.top + 6)) + 'px';
+  }
+
+  const setPreview = (srcPlain, srcHtml, tgtPlain, tgtHtml) => {
+    const srcEl = $('#hs-pretty-src'), tgtEl = $('#hs-pretty-tgt'), ta = $('#hs-out');
+    if (PTV_RENDER_CACHE.srcPlain === (srcPlain||'') &&
+        PTV_RENDER_CACHE.srcHtml  === (srcHtml ||'') &&
+        PTV_RENDER_CACHE.tgtPlain === (tgtPlain||'') &&
+        PTV_RENDER_CACHE.tgtHtml  === (tgtHtml ||'')) return;
+    PTV_RENDER_CACHE.srcPlain = srcPlain || ''; PTV_RENDER_CACHE.srcHtml = srcHtml || '';
+    PTV_RENDER_CACHE.tgtPlain = tgtPlain || ''; PTV_RENDER_CACHE.tgtHtml = tgtHtml || '';
+    srcEl.innerHTML = PTV_RENDER_CACHE.srcHtml; tgtEl.innerHTML = PTV_RENDER_CACHE.tgtHtml;
+    ta.value = PTV_RENDER_CACHE.tgtPlain; // Copy button copies TARGET
+  };
+
+  /* ===================== Decoding / conversion ===================== */
+  const decodeHtml = s => { const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
+  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const stripNumericBraces = s => String(s ?? '').replace(/\{(\d+)\}/g, '$1'); // "{123}" → "123"
+  const stripDoubleBrackets = s => String(s ?? '').replace(/\[\[[\s\S]*?\]\]/g, '');
+
+  function extractPhraseTagValue(el) {
+    const meta = el.querySelector?.('.tag_metadata_content')?.textContent || el.getAttribute?.('tmp-title') || el.getAttribute?.('title') || '';
+    if (!meta) return { text:'', fromTag:true };
+    const un = decodeHtml(meta);
+    let m = un.match(/displaytext="([^"]*)"/i) || un.match(/val="([^"]*)"/i);
+    if (m) return { text: decodeHtml(m[1]||''), fromTag:true };
+    let inner = un.match(/<(?:bpt|ept)\b[^>]*>([\s\S]*?)<\/(?:bpt|ept)>/i) || un.match(/<\w+\b[^>]*>([\s\S]*?)<\/\w+>/i);
+    if (inner) return { text: decodeHtml(inner[1]||''), fromTag:true };
+    return { text: el.getAttribute?.('data-tag-content') || '', fromTag:true };
+  }
+
+  function rebuildConvertedRich(container) {
+    if (!container) return { plain:'', html:'' };
+    let plain = '', html = '';
+    container.childNodes.forEach(n => {
+      if (n.nodeType === 3) { const t = n.nodeValue || ''; plain += t; html += escapeHtml(t); return; }
+      if (n.nodeType !== 1) return;
+      if (n.classList?.contains('te_txt')) { const t = n.textContent || ''; plain += t; html += escapeHtml(t); return; }
+      if (n.classList?.contains('te_tag') || n.matches?.('[data-testid="tag"],[data-tag],[data-tag-type]')) {
+        const { text } = extractPhraseTagValue(n);
+        const m = /^\{(\d+)\}$/.exec(text);
+        if (m) { const num = m[1]; plain += num; html += `<span class="hs-taglit">${escapeHtml(num)}</span>`; }
+        else   { plain += text; html += `<span class="hs-taglit">${escapeHtml(text)}</span>`; }
+      }
+    });
+    return { plain: stripNumericBraces(plain), html };
+  }
+
+  /* ===================== Variables: scanning / applying (TARGET only) ===================== */
+  const DICE_MIN = 0.55, RATIO_MIN = 0.65, MIN_TOKENS = 4;
+
+  const normalizeForSim = s =>
+    s.replace(/\|4\(\s*[^,]+?\s*,\s*[^)]+?\s*\)/g, ' ALT ') // neutralize |4
+     .replace(/<[^>]+>/g, ' ')                              // drop tags
+     .toLowerCase().replace(/\s+/g, ' ').trim();
+
+  const tokenize = s => s.match(/[0-9A-Za-zÀ-ÖØ-öø-ÿ]+/g) || [];
+  const bag      = toks => toks.reduce((m,t)=> (m.set(t,(m.get(t)||0)+1),m), new Map());
+  const bagSize  = m => { let n=0; for (const v of m.values()) n+=v; return n; };
+  const interSz  = (a,b) => { let n=0; for (const [t,ca] of a) { const cb=b.get(t); if (cb) n+=Math.min(ca,cb);} return n; };
+
+  // Build a boolean mask of chars inside [[...]]; also return mapping origIdx -> strippedIdx
+  function maskAndMapBracketed(s) {
+    const mask = new Array(s.length).fill(false); // true = inside [[...]]
+    const re = /\[\[|\]\]/g; let m, stack = [];
+    while ((m = re.exec(s))) {
+      if (m[0] === '[[') stack.push(m.index);
+      else if (m[0] === ']]' && stack.length) {
+        const a = stack.pop(), b = m.index + 2;
+        for (let i=a;i<b;i++) mask[i] = true;
+      }
+    }
+    const map = new Array(s.length).fill(-1);
+    let j=0; for (let i=0;i<s.length;i++) if (!mask[i]) map[i]=j++;
+    return { mask, map, stripped: stripDoubleBrackets(s) };
+  }
+
+  // Scan all '@' positions using regex
+  const scanAtPositions = s => {
+    const pos = []; let m, re=/@/g, nth=0;
+    while ((m = re.exec(s))) pos.push({ idx:m.index, nth: ++nth });
+    return pos;
+  };
+
+  // Choose best '@' by Dice similarity, ignoring bracketed regions
+  function pickBestAtNth(original) {
+    const { mask, map, stripped } = maskAndMapBracketed(original);
+    const atPos = scanAtPositions(original).filter(p => !mask[p.idx]);
+    if (!atPos.length) return { nth: 0 };
+
+    let bestNth=0, bestDice=-1;
+    for (const { idx, nth } of atPos) {
+      const si = map[idx]; if (si < 0) continue;
+      const Ls = normalizeForSim(stripped.slice(0, si));
+      const Rs = normalizeForSim(stripped.slice(si + 1));
+      const L = tokenize(Ls), R = tokenize(Rs);
+      const nL=L.length, nR=R.length; if (nL<MIN_TOKENS || nR<MIN_TOKENS) continue;
+      if (Math.min(nL,nR)/Math.max(nL,nR) < RATIO_MIN) continue;
+      const dice = (2*interSz(bag(L), bag(R))) / (bagSize(bag(L)) + bagSize(bag(R)));
+      if (dice >= DICE_MIN && dice > bestDice) { bestDice = dice; bestNth = nth; }
+    }
+    return { nth: bestNth };
+  }
+
+  // Resolve the Nth '@' (1-based) to either side; if nth=0, return original
+  function resolveAtNth(text, choice, nth) {
+    if (!nth || (choice!=='before' && choice!=='after')) return text;
+    let seen=0;
+    for (let i=0;i<text.length;i++) if (text[i]==='@' && ++seen===nth) return (choice==='after') ? text.slice(i+1) : text.slice(0,i);
+    return text;
+  }
+
+  // Resolve |4(a,b) with provided choices array of 'a'|'b'
+  function resolveOr(text, choices) {
+    const re = /\|4\(\s*([^,]*?)\s*,\s*([^)]+?)\s*\)/g; let k=0;
+    return text.replace(re, (_, a, b) => ((choices && choices[k++] === 'b') ? b : a));
+  }
+
+  // Build/refresh variable flyout (vertical list, unified, applies to TARGET)
+  function buildVarsFlyout(basePlain) {
+    if (!VARS_FLY) return;
+    const list = $('#hs-vars-list'); if (!list) return;
+    list.textContent = '';
+
+    // Pick @ and scan |4 on TARGET
+    VAR_AT_NTH = (pickBestAtNth(basePlain).nth || 0);
+    const orPairs = (() => {
+      const out=[]; let m, re=/\|4\(\s*([^,]*?)\s*,\s*([^)]+?)\s*\)/g;
+      while ((m=re.exec(basePlain))) out.push({ a:(m[1]||'').trim(), b:(m[2]||'').trim() });
+      return out;
+    })();
+
+    VAR_CHOICES = { at: 'before', or: new Array(orPairs.length).fill('a') };
+
+    const makeSwitchRow = (leftLabel, rightLabel, checked, onChange) => {
+      const row = document.createElement('div'); row.className = 'vars-item';
+      const left = document.createElement('span'); left.className='vars-option left'; left.textContent = leftLabel;
+      const right= document.createElement('span'); right.className='vars-option right'; right.textContent = rightLabel;
+      const sw = document.createElement('label'); sw.className='ptv-switch';
+      const input = document.createElement('input'); input.type='checkbox'; input.checked=!!checked;
+      const track=document.createElement('span'); track.className='track';
+      const thumb=document.createElement('span'); thumb.className='thumb';
+      input.addEventListener('change', () => onChange(input.checked));
+      sw.append(input,track,thumb);
+      const wrap = document.createElement('div'); wrap.className='vars-label'; wrap.append(left, sw, right);
+      row.appendChild(wrap); return row;
+    };
+
+    if (VAR_AT_NTH > 0) {
+      list.appendChild(makeSwitchRow('Before @', 'After @', false, checked => { VAR_CHOICES.at = checked ? 'after' : 'before'; render(); }));
+    }
+    orPairs.forEach((p,i) => {
+      list.appendChild(makeSwitchRow(p.a || 'a', p.b || 'b', false, checked => { VAR_CHOICES.or[i] = checked ? 'b' : 'a'; render(); }));
+    });
+
+    if (!list.children.length) {
+      const none = document.createElement('div'); none.className='vars-item'; none.textContent='No variables found in this segment.'; list.appendChild(none);
+    }
+  }
+
+  // Apply variable choices to TARGET only, then strip [[...]] for final display/copy
+  function applyVariablesToOutputs(basePlain, baseHtml) {
+    let p = resolveAtNth(basePlain, VAR_CHOICES.at, VAR_AT_NTH);
+    let h = resolveAtNth(baseHtml,  VAR_CHOICES.at, VAR_AT_NTH);
+    p = resolveOr(p, VAR_CHOICES.or); h = resolveOr(h, VAR_CHOICES.or);
+    return { plain: stripDoubleBrackets(p), html: stripDoubleBrackets(h) };
+  }
+
+  /* ===================== Active row & doc sweep ===================== */
+  const finders = {
+    byCaret: d => d.getElementById?.('segment-text-editor-input')?.closest?.('.twe_segment') || null,
+    byCursor: d => d.querySelector?.('.twe_segment .twe_target .te_selection_container .te_cursor')?.closest?.('.twe_segment') || null,
+    byFocusedInput(d) {
+      const a = d.activeElement; if (!a) return null;
+      return a.matches?.('input.twe-main-input, textarea.twe-main-input, [contenteditable="true"]')
+        ? (a.closest('.twe_segment') || a.closest('[data-testid="segment"]') || null) : null;
+    },
+    byActiveClass: d => d.querySelector?.('.twe_segment.twe_active, .twe_segment.twe_active_background, [data-testid="segment"][data-selected="true"]')
+  };
+
+  function readActiveFromDoc(doc) {
+    const row = finders.byCaret(doc) || finders.byCursor(doc) || finders.byFocusedInput(doc) || finders.byActiveClass(doc);
+    if (!row) return { row:null, plain:'', html:'', srcPlain:'', srcHtml:'' };
+
+    // TARGET
+    const tgtCont = row.querySelector?.('.twe_target .te_text_container') ||
+                    row.querySelector?.('[data-testid="target"] .te_text_container') ||
+                    row.querySelector?.('.twe_target [data-role="text-container"]');
+    let tgt = tgtCont ? rebuildConvertedRich(tgtCont) : null;
+    if (!tgt) {
+      const live = row.querySelector?.('.twe_target .twe-main-input, textarea.twe-main-input, [contenteditable="true"]');
+      const raw = (live && (live.value || live.textContent)) || '';
+      tgt = { plain: stripNumericBraces(raw), html: escapeHtml(raw) };
+    }
+
+    // SOURCE (mirror logic)
+    const srcCont = row.querySelector?.('.twe_source .te_text_container') ||
+                    row.querySelector?.('[data-testid="source"] .te_text_container') ||
+                    row.querySelector?.('.twe_source [data-role="text-container"]');
+    let src = srcCont ? rebuildConvertedRich(srcCont) : null;
+    if (!src) {
+      const sEl = row.querySelector?.('.twe_source, [data-testid="source"]');
+      const raw = sEl?.textContent || '';
+      src = { plain: stripNumericBraces(raw), html: escapeHtml(raw) };
+    }
+
+    return { row, plain: tgt.plain, html: tgt.html, srcPlain: src.plain, srcHtml: src.html };
+  }
+
+  // Memoized iframe sweep (refresh ~1s)
+  let DOC_CACHE = { ts: 0, docs: [] };
+  function getAllDocs(rootDoc = document) {
+    const now = Date.now();
+    if (now - DOC_CACHE.ts < 1000 && DOC_CACHE.docs.length) return { docs: DOC_CACHE.docs };
+    const acc = new Set();
+    (function walk(d){
+      if (!d || acc.has(d)) return;
+      acc.add(d);
+      const ifr = d.querySelectorAll('iframe');
+      for (const f of ifr) {
+        try { const cd = f.contentDocument || f.contentWindow?.document; if (cd) walk(cd); } catch {}
+      }
+    })(rootDoc);
+    DOC_CACHE = { ts: now, docs: Array.from(acc) };
+    return { docs: DOC_CACHE.docs };
+  }
+
+  /* ===================== Bridge ===================== */
+  const MSG_MARK = '__hs_bridge__';
+  const postToChildren = msg => { if (!IS_TOP) return; for (let i=0;i<window.frames.length;i++) { try { window.frames[i].postMessage({[MSG_MARK]:true, ...msg}, '*'); } catch {} } };
+  const postToParent   = msg => { if (IS_TOP) return; try { window.parent.postMessage({[MSG_MARK]:true, ...msg }, '*'); } catch {} };
+
+  window.addEventListener('message', e => {
+    const d = e?.data; if (!d || !d[MSG_MARK]) return;
+    if (IS_TOP) {
+      if (d.type === 'ACTIVE') {
+        lastActive = {
+          plain: (d.payload?.plain ?? d.payload?.text) || '',
+          html: d.payload?.html || '',
+          srcPlain: d.payload?.srcPlain || '',
+          srcHtml:  d.payload?.srcHtml  || ''
+        };
+        ensureUI(); render();
+      }
+    } else {
+      if (d.type === 'PING')            postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'editor-frame' });
+      if (d.type === 'REQUEST_ACTIVE') {
+        const r = readActiveFromDoc(document);
+        postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{
+          plain:r.plain||'', html:r.html||'', srcPlain:r.srcPlain||'', srcHtml:r.srcHtml||''
+        }});
+      }
+    }
+  }, true);
+
+  /* ===================== Render/update ===================== */
+  function render() {
+    if (!IS_TOP || PTV_SELECTING) return;
+    ensureUI();
+
+    const { docs } = getAllDocs(document);
+    let found = null;
+    for (const d of docs) { const r = readActiveFromDoc(d); if (r.row) { found = r; break; } }
+    const active = found || lastActive || null;
+
+    const baseSrcPlain = active?.srcPlain || '';
+    const baseSrcHtml  = active?.srcHtml  || '';
+    const basePlain = active?.plain || '';
+    const baseHtml  = active?.html  || '';
+
+    // Source preview: always just show values/tags and strip [[...]]
+    const srcP = stripDoubleBrackets(baseSrcPlain);
+    const srcH = stripDoubleBrackets(baseSrcHtml);
+
+    if (!VARS_ENABLED) {
+      const tgtP = stripDoubleBrackets(basePlain);
+      const tgtH = stripDoubleBrackets(baseHtml);
+      setPreview(srcP, srcH, tgtP, tgtH);
+      PREV_BASE_PLAIN = basePlain;
+      VARS_FLY?.classList.add('hidden');
+      return;
+    }
+
+    positionVarsFlyout();
+    VARS_FLY?.classList.remove('hidden');
+
+    if (PREV_BASE_PLAIN !== basePlain) {
+      buildVarsFlyout(basePlain);
+      PREV_BASE_PLAIN = basePlain;
+    }
+
+    const resolved = applyVariablesToOutputs(basePlain, baseHtml); // target only
+    setPreview(srcP, srcH, resolved.plain, resolved.html);
+  }
+
+  function wireInstantSignals() {
+    const instant = () => { IS_TOP ? render() : tickFrame(); };
+    ['input','keyup','selectionchange','pointerup','focusin'].forEach(ev => document.addEventListener(ev, instant, true));
+  }
+
+  function tickTop()   { postToChildren({type:'PING'}); postToChildren({type:'REQUEST_ACTIVE'}); render(); }
+  function tickFrame() {
+    const r = readActiveFromDoc(document);
+    if (r && (r.row || r.plain || r.html || r.srcPlain || r.srcHtml))
+      postToParent({ type:'ACTIVE', frameId:ORIGIN_ID, info:'editor-frame', payload:{
+        plain:r.plain||'', html:r.html||'', srcPlain:r.srcPlain||'', srcHtml:r.srcHtml||''
+      }});
+    else postToParent({ type:'PONG', frameId:ORIGIN_ID, info:'probe' });
+  }
+
+  /* ===================== Boot ===================== */
+  function boot() {
+    if (IS_TOP) ensureUI();
+    VARS_ENABLED = (localStorage.getItem(VARS_KEY) === '1');
+    if (IS_TOP && $('#hs-vars-toggle')) $('#hs-vars-toggle').checked = VARS_ENABLED;
+    wireInstantSignals();
+    const tick = IS_TOP ? tickTop : tickFrame;
+    setTimeout(tick, 300);
+    setInterval(tick, 350);
+  }
+  boot();
+})();
