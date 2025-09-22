@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Phrase Tag Viewer (Source + Target)
 // @namespace    hs.phrase.copyexport
-// @version      1.6.0
+// @version      1.6.1
 // @description  Shows source (left) and target (right) for the active Phrase segment. Tag widgets → values (mq:rxt) and bpt/ept inner markup; strip {123}→123; ignore [[...]] in both previews and when choosing the relevant @; colored tags by theme; light/dark w/ memory; iframe-safe; selection-safe; variable toggles (single-@ and |4) in one vertical list above the “Toggle Variables” checkbox.
 // @match        https://app.phrase.com/*
 // @match        https://*.phrase.com/*
@@ -34,6 +34,29 @@
   let VAR_CHOICES = { at: 'before', or: [] }; // 'at' = before|after; 'or' = ['a'|'b', ...]
   let VAR_AT_NTH  = 0;                         // selected @ ordinal (1-based) in ORIGINAL target string
   let PREV_BASE_PLAIN = '';
+
+  // Show button anchoring (remember where the Hide button was)
+  let SHOW_ANCHOR = { rightGap: 8, bottomGap: 8, btnW: 88 };
+  function positionShowButtonFromAnchor() {
+    if (!showBtn) return;
+    const rg = SHOW_ANCHOR.rightGap ?? 8;
+    const bg = SHOW_ANCHOR.bottomGap ?? 8;
+    const w  = SHOW_ANCHOR.btnW || 88;
+    showBtn.style.left   = Math.max(8, window.innerWidth  - rg - w) + 'px';
+    showBtn.style.bottom = Math.max(8, bg) + 'px';
+  }
+  function positionShowButtonNearHide() {
+    if (!ui || !showBtn) return;
+    const r = ui.getBoundingClientRect();
+    const rightGap  = Math.max(8, Math.round(window.innerWidth  - (r.left + r.width)));
+    const bottomGap = Math.max(8, Math.round(window.innerHeight -  r.bottom));
+    SHOW_ANCHOR.rightGap  = rightGap;
+    SHOW_ANCHOR.bottomGap = bottomGap;
+    SHOW_ANCHOR.btnW      = 88;
+    showBtn.style.left   = Math.max(8, window.innerWidth - rightGap - SHOW_ANCHOR.btnW) + 'px';
+    showBtn.style.bottom = bottomGap + 'px';
+  }
+  let FS_BOUND = false;
 
   const addClickFeedback = btn => {
     if (!btn || btn.dataset._ptvClickFx) return;
@@ -207,12 +230,7 @@
     $('#hs-copybtn').addEventListener('click', copyHandler);
     addClickFeedback($('#hs-copybtn'));
 
-    // Hide/Show
-    const positionShowButtonNearHide = () => {
-      const r = ui.getBoundingClientRect();
-      showBtn.style.left = Math.round(r.left + r.width - 88) + 'px';
-      showBtn.style.bottom = Math.max(8, Math.round(window.innerHeight - r.bottom)) + 'px';
-    };
+    // Hide/Show (anchored)
     const doHide = () => { positionShowButtonNearHide(); ui.classList.add('hidden'); showBtn.classList.remove('hidden'); VARS_FLY?.classList.add('hidden'); };
     const doShow = () => { ui.classList.remove('hidden'); showBtn.classList.add('hidden'); if (VARS_ENABLED) { positionVarsFlyout(); VARS_FLY?.classList.remove('hidden'); } };
     $('#hs-hide').addEventListener('click', doHide);
@@ -228,10 +246,13 @@
     fsInput.addEventListener('change', applyFs);
     applyFs();
 
-    // Resize hooks
+    // Resize hooks (keep Show anchored when hidden)
     window.addEventListener('resize', () => {
-      if (ui.classList.contains('hidden')) { const r = ui.getBoundingClientRect(); showBtn.style.left = Math.round(r.left + r.width - 88) + 'px'; }
-      if (VARS_ENABLED && !ui.classList.contains('hidden')) positionVarsFlyout();
+      if (ui.classList.contains('hidden')) {
+        positionShowButtonFromAnchor();
+      } else if (VARS_ENABLED) {
+        positionVarsFlyout();
+      }
     });
 
     // Keyboard toggle (Alt+P)
@@ -243,6 +264,22 @@
     createVarsFlyout();
     VARS_FLY.classList.toggle('hidden', !VARS_ENABLED);
     if (VARS_ENABLED) positionVarsFlyout();
+
+    // Fullscreen change → keep Show anchored
+    if (!FS_BOUND) {
+      ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(ev => {
+        document.addEventListener(ev, () => {
+          if (!showBtn || !ui) return;
+          if (ui.classList.contains('hidden')) {
+            showBtn.classList.remove('hidden');
+            positionShowButtonFromAnchor();
+          } else {
+            positionShowButtonNearHide();
+          }
+        }, true);
+      });
+      FS_BOUND = true;
+    }
   }
 
   function createVarsFlyout(){
@@ -275,7 +312,7 @@
 
   /* ===================== Decoding / conversion ===================== */
   const decodeHtml = s => { const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
-  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const stripNumericBraces = s => String(s ?? '').replace(/\{(\d+)\}/g, '$1'); // "{123}" → "123"
   const stripDoubleBrackets = s => String(s ?? '').replace(/\[\[[\s\S]*?\]\]/g, '');
 
@@ -311,8 +348,8 @@
   const DICE_MIN = 0.55, RATIO_MIN = 0.65, MIN_TOKENS = 4;
 
   const normalizeForSim = s =>
-    s.replace(/\|4\(\s*[^,]+?\s*,\s*[^)]+?\s*\)/g, ' ALT ') // neutralize |4
-     .replace(/<[^>]+>/g, ' ')                              // drop tags
+    s.replace(/\|4\(\s*[^,]+?\s*,\s*[^)]+?\s*\)/g, ' ALT ')
+     .replace(/<[^>]+>/g, ' ')
      .toLowerCase().replace(/\s+/g, ' ').trim();
 
   const tokenize = s => s.match(/[0-9A-Za-zÀ-ÖØ-öø-ÿ]+/g) || [];
@@ -320,9 +357,8 @@
   const bagSize  = m => { let n=0; for (const v of m.values()) n+=v; return n; };
   const interSz  = (a,b) => { let n=0; for (const [t,ca] of a) { const cb=b.get(t); if (cb) n+=Math.min(ca,cb);} return n; };
 
-  // Build a boolean mask of chars inside [[...]]; also return mapping origIdx -> strippedIdx
   function maskAndMapBracketed(s) {
-    const mask = new Array(s.length).fill(false); // true = inside [[...]]
+    const mask = new Array(s.length).fill(false);
     const re = /\[\[|\]\]/g; let m, stack = [];
     while ((m = re.exec(s))) {
       if (m[0] === '[[') stack.push(m.index);
@@ -336,14 +372,12 @@
     return { mask, map, stripped: stripDoubleBrackets(s) };
   }
 
-  // Scan all '@' positions using regex
   const scanAtPositions = s => {
     const pos = []; let m, re=/@/g, nth=0;
     while ((m = re.exec(s))) pos.push({ idx:m.index, nth: ++nth });
     return pos;
   };
 
-  // Choose best '@' by Dice similarity, ignoring bracketed regions
   function pickBestAtNth(original) {
     const { mask, map, stripped } = maskAndMapBracketed(original);
     const atPos = scanAtPositions(original).filter(p => !mask[p.idx]);
@@ -363,7 +397,6 @@
     return { nth: bestNth };
   }
 
-  // Resolve the Nth '@' (1-based) to either side; if nth=0, return original
   function resolveAtNth(text, choice, nth) {
     if (!nth || (choice!=='before' && choice!=='after')) return text;
     let seen=0;
@@ -371,13 +404,11 @@
     return text;
   }
 
-  // Resolve |4(a,b) with provided choices array of 'a'|'b'
   function resolveOr(text, choices) {
     const re = /\|4\(\s*([^,]*?)\s*,\s*([^)]+?)\s*\)/g; let k=0;
     return text.replace(re, (_, a, b) => ((choices && choices[k++] === 'b') ? b : a));
   }
 
-  // Build/refresh variable flyout (vertical list, unified, applies to TARGET)
   function buildVarsFlyout(basePlain) {
     if (!VARS_FLY) return;
     const list = $('#hs-vars-list'); if (!list) return;
@@ -419,7 +450,6 @@
     }
   }
 
-  // Apply variable choices to TARGET only, then strip [[...]] for final display/copy
   function applyVariablesToOutputs(basePlain, baseHtml) {
     let p = resolveAtNth(basePlain, VAR_CHOICES.at, VAR_AT_NTH);
     let h = resolveAtNth(baseHtml,  VAR_CHOICES.at, VAR_AT_NTH);
