@@ -856,11 +856,15 @@ localStorage.setItem(VARS_KEY, '0');
     })();
   </script>
 
-  <h2>Improved Tag Viewer ("Phrase Buddy" beta version)</h2>
-  <div class="codewrap">
-    <button class="copybtn" id="copyPBCodeBtn">Copy code</button>
-    <pre><code id="pbCodeblock">(no script pasted yet)</code></pre>
+    <div class="card">
+      <h2>Improved Tag Viewer ("Phrase Buddy" beta version)</h2>
+      <div class="codewrap">
+        <button class="copybtn" id="copyPBCodeBtn">Copy code</button>
+        <pre><code id="pbCodeblock">(no script pasted yet)</code></pre>
+      </div>
+    </div>
   </div>
+
   <script id="pb-payload" type="text/plain">
 // ==UserScript==
 // @name         Phrase Buddy
@@ -8223,6 +8227,35 @@ if (document.readyState === 'loading') {
 
 
   </script>
+  <script>
+    (function(){
+      const payloadTag = document.getElementById('pb-payload');
+      const codeblock  = document.getElementById('pbCodeblock');
+      const btn        = document.getElementById('copyPBCodeBtn');
+
+      const userscript = (payloadTag && payloadTag.textContent) ? payloadTag.textContent.trim() : '';
+      codeblock.textContent = userscript || '(no script pasted yet)';
+
+      btn.addEventListener('click', async () => {
+        const text = userscript || '';
+        if (!text) { btn.textContent = 'Nothing to copy'; setTimeout(()=>btn.textContent='Copy code', 1300); return; }
+        try {
+          await navigator.clipboard.writeText(text);
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy code', 1400);
+        } catch (e) {
+          const ta = document.createElement('textarea');
+          ta.value = text; ta.style.position = 'fixed'; ta.style.left='-9999px'; ta.style.top='-9999px';
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          btn.textContent = ok ? 'Copied!' : 'Select & Ctrl+C';
+          setTimeout(() => btn.textContent = 'Copy code', 1400);
+        }
+      });
+    })();
+  </script>
+
   <script>
     (function(){
       const payloadTag = document.getElementById('pb-payload');
